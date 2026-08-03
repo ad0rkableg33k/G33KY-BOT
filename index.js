@@ -60,6 +60,7 @@ const recentlyWarnedAt = new Map(); // userId -> timestamp of last DM sent
 const CAMERA_EXEMPT_ROLE_IDS = [
   '1522494914255126559',
   '1491315204162850858',
+  '1491333963023650826',
 ];
 const warnedUsers = new Map(); // userId -> { timeoutId, warningMessage }
 
