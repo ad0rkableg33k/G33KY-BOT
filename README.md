@@ -1,4 +1,4 @@
-# LNS Channel Indexer Bot
+# xXOnlineStatusXx Channel Indexer Bot
 
 Exports every channel in your server to `channels.json` and can post a
 formatted, categorized index (name + clickable link + topic) into any
@@ -19,7 +19,7 @@ granted on the invite for future use, but nothing in this script uses it.)
 
 3. **Get your Server (Guild) ID**
    - In Discord, go to User Settings > Advanced > turn on Developer Mode
-   - Right-click your server icon (Late Night Society) > Copy Server ID
+   - Right-click your server icon (xXOnlineStatusXx) > Copy Server ID
 
 4. **Fill in your `.env` file**
    - Copy `.env.example` to a new file named `.env`
@@ -109,7 +109,7 @@ The monitored channel IDs are hard-coded near the top of `index.js` in
    - Scopes: `bot` and `applications.commands` (same as before)
    - Bot Permissions: keep everything checked from before, and additionally
      check **Move Members**
-   - Copy the new URL, open it, select Late Night Society, Authorize again
+   - Copy the new URL, open it, select xXOnlineStatusXx, Authorize again
    - (Re-authorizing just updates the existing bot's permissions — no need
      to remove it first)
 

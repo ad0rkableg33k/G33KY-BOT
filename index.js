@@ -1,4 +1,4 @@
-// LNS Channel Indexer Bot
+// xXOnlineStatusXx Channel Indexer Bot
 // - Exports every channel in the server to channels.json
 // - Registers a /channel-index slash command that posts a formatted
 //   list of channels (name + link) into whatever channel it's run in
