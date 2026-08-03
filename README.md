@@ -136,3 +136,12 @@ there's a "Copy Role ID" option (or right-click the role in the member list
 sidebar) -> send the ID to Claude, or paste it directly into the list in
 `index.js`. No new Discord permissions are needed for this — it's a
 code-only change.
+
+### Anti-spam safeguard
+
+If someone rapidly toggles their camera off/on/off, the bot won't send a
+fresh DM warning every single time — only once per minute
+(`CAMERA_REWARN_COOLDOWN_MS` near the top of `index.js`, adjustable). It
+still silently tracks and enforces the policy underneath, though — if they
+genuinely leave the camera off, they'll still get moved out on schedule,
+they just won't get spammed with a new DM for every quick flicker.

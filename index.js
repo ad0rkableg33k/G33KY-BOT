@@ -46,6 +46,13 @@ const CAMERA_ON_CHANNEL_IDS = [
 ];
 const CAMERA_WARNING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
+// If someone quickly toggles their camera off/on/off, this prevents sending
+// a fresh DM every single time. Within this window after their last warning,
+// re-triggering a camera-off still gets tracked and enforced (they can still
+// be moved out if they leave it off), just without a duplicate DM.
+const CAMERA_REWARN_COOLDOWN_MS = 60 * 1000; // 1 minute
+const recentlyWarnedAt = new Map(); // userId -> timestamp of last DM sent
+
 // Members with ANY of these roles are exempt from the cameras-on policy
 // entirely — they can be in a monitored channel with camera off and never
 // get warned or moved. Right-click a role in Server Settings -> Roles
@@ -427,11 +434,24 @@ async function handleCameraOff(member, channel) {
   // Don't double-warn someone who's already got an active warning running
   if (warnedUsers.has(member.id)) return;
 
+  const now = Date.now();
+  const lastWarned = recentlyWarnedAt.get(member.id);
+  const withinCooldown = lastWarned && now - lastWarned < CAMERA_REWARN_COOLDOWN_MS;
+
+  let warningMessage = null;
+
   try {
-    const minutes = Math.round(CAMERA_WARNING_TIMEOUT_MS / 60000);
-    const warningMessage = await member.send(
-      `📷 Please enable your camera in **${channel.name}** within the next ${minutes} minute(s), or you'll be moved out of the channel.`
-    );
+    if (!withinCooldown) {
+      const minutes = Math.round(CAMERA_WARNING_TIMEOUT_MS / 60000);
+      warningMessage = await member.send(
+        `📷 Please enable your camera in **${channel.name}** within the next ${minutes} minute(s), or you'll be moved out of the channel.`
+      );
+      recentlyWarnedAt.set(member.id, now);
+    } else {
+      // Skip the duplicate DM, but still track and enforce silently —
+      // they can still get moved out if they leave the camera off
+      console.log(`Skipping duplicate DM for ${member.user.tag} (rewarn cooldown active)`);
+    }
 
     const timeoutId = setTimeout(async () => {
       try {
@@ -464,6 +484,8 @@ async function clearWarning(memberId) {
 
   clearTimeout(info.timeoutId);
   warnedUsers.delete(memberId);
+
+  if (!info.warningMessage) return; // this warning cycle never sent a DM (cooldown-suppressed)
 
   try {
     await info.warningMessage.edit('✅ Thanks for turning your camera on!');
