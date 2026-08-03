@@ -45,6 +45,15 @@ const CAMERA_ON_CHANNEL_IDS = [
   '1491289586201006084',
 ];
 const CAMERA_WARNING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+// Members with ANY of these roles are exempt from the cameras-on policy
+// entirely — they can be in a monitored channel with camera off and never
+// get warned or moved. Right-click a role in Server Settings -> Roles
+// (or right-click a member and check their roles) to grab a role's ID.
+const CAMERA_EXEMPT_ROLE_IDS = [
+  '1522494914255126559',
+  '1491315204162850858',
+];
 const warnedUsers = new Map(); // userId -> { timeoutId, warningMessage }
 
 // Whether the Cameras-On policy is currently active. Persisted to a small
@@ -479,6 +488,14 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const member = newState.member;
   const channel = newState.channel;
   const cameraIsOn = newState.selfVideo;
+
+  const isExempt = member.roles.cache.some((role) => CAMERA_EXEMPT_ROLE_IDS.includes(role.id));
+  if (isExempt) {
+    // Exempt members never get warned — but if they were already mid-warning
+    // (e.g. a role was just added to them), clear it so it doesn't still fire
+    if (warnedUsers.has(member.id)) await clearWarning(member.id);
+    return;
+  }
 
   if (!cameraIsOn) {
     // Either just joined with camera off, or was already in and turned it off

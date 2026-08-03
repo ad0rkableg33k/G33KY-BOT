@@ -126,3 +126,13 @@ sticks even through a bot restart (e.g. a Railway redeploy won't silently
 turn it back on if you'd switched it off). Turning it off also immediately
 cancels any warnings currently in progress, so nobody gets moved out after
 the fact.
+
+### Exempting roles from the camera policy
+
+Members with a role listed in `CAMERA_EXEMPT_ROLE_IDS` (near the top of
+`index.js`) skip the cameras-on enforcement entirely, no matter what channel
+they're in. To exempt a role: Server Settings -> Roles -> click the role ->
+there's a "Copy Role ID" option (or right-click the role in the member list
+sidebar) -> send the ID to Claude, or paste it directly into the list in
+`index.js`. No new Discord permissions are needed for this — it's a
+code-only change.
