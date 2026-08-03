@@ -83,3 +83,46 @@ messy pinned templates in a channel's topic) will ever show up here.
 `Ctrl+C` in the terminal. The bot only needs to run while you're actively
 using the slash commands — it doesn't need to stay online 24/7 unless you
 want the slash commands available any time.
+
+## Cameras-On voice channel policy
+
+The bot enforces a "camera must be on" rule in specific voice channels.
+If someone joins one of those channels (or turns their camera off while
+already in one), the bot DMs them a warning. If they don't turn their
+camera on within 5 minutes, they get moved out of the channel automatically.
+The monitored channel IDs are hard-coded near the top of `index.js` in
+`CAMERA_ON_CHANNEL_IDS` — edit that list directly to add or remove channels.
+
+**This feature needs two things enabled that the rest of the bot didn't:**
+
+1. **Server Members Intent** — this is a "privileged" intent Discord makes
+   you turn on manually:
+   - Go to the Discord Developer Portal
+   - Your bot -> **Bot** page (left sidebar)
+   - Scroll to **Privileged Gateway Intents**
+   - Turn ON **"Server Members Intent"**
+   - Save changes
+
+2. **Move Members permission** — the original bot invite didn't include
+   this, so you'll need to re-invite the bot with it added:
+   - Developer Portal -> your bot -> **OAuth2** -> **URL Generator**
+   - Scopes: `bot` and `applications.commands` (same as before)
+   - Bot Permissions: keep everything checked from before, and additionally
+     check **Move Members**
+   - Copy the new URL, open it, select Late Night Society, Authorize again
+   - (Re-authorizing just updates the existing bot's permissions — no need
+     to remove it first)
+
+If you skip step 1, the bot will fail to log in at all with an intent
+error. If you skip step 2, it'll DM the warning fine but fail (silently
+logged in the terminal) when it tries to actually move someone out.
+
+### Turning the policy on/off
+
+Use `/camera-policy state:Off` or `/camera-policy state:On` right in Discord
+— no restart needed. Only people with **Manage Server** permission can use
+this command. The setting is saved to `camera-policy-state.json` so it
+sticks even through a bot restart (e.g. a Railway redeploy won't silently
+turn it back on if you'd switched it off). Turning it off also immediately
+cancels any warnings currently in progress, so nobody gets moved out after
+the fact.

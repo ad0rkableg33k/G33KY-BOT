@@ -14,6 +14,7 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
+  PermissionFlagsBits,
   EmbedBuilder,
   ChannelType,
 } = require('discord.js');
@@ -26,8 +27,52 @@ if (!TOKEN || !GUILD_ID) {
   process.exit(1);
 }
 
+// ---- Cameras-On policy config ----
+// Voice channels where members must have their camera on. Grabbed by
+// right-clicking each voice channel -> Copy Channel ID.
+const CAMERA_ON_CHANNEL_IDS = [
+  '1492754497305575524',
+  '1508940784764846165',
+  '1519414974882119871',
+  '1519926109192458330',
+  '1497494159391588443',
+  '1511860830612881538',
+  '1519415207884226643',
+  '1533720010835493016',
+  '1529786928453390526',
+  '1491289314053587045',
+  '1491289471596101692',
+  '1491289586201006084',
+];
+const CAMERA_WARNING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const warnedUsers = new Map(); // userId -> { timeoutId, warningMessage }
+
+// Whether the Cameras-On policy is currently active. Persisted to a small
+// file so a restart (e.g. a Railway redeploy) doesn't silently turn it back
+// on if you'd switched it off.
+const CAMERA_POLICY_STATE_FILE = 'camera-policy-state.json';
+
+function loadCameraPolicyEnabled() {
+  try {
+    const raw = fs.readFileSync(CAMERA_POLICY_STATE_FILE, 'utf-8');
+    return JSON.parse(raw).enabled;
+  } catch {
+    return true; // default: on, if no state file exists yet
+  }
+}
+
+function saveCameraPolicyEnabled(enabled) {
+  fs.writeFileSync(CAMERA_POLICY_STATE_FILE, JSON.stringify({ enabled }, null, 2));
+}
+
+let cameraPolicyEnabled = loadCameraPolicyEnabled();
+
+// GuildMembers is a PRIVILEGED intent — you must turn it on for this bot
+// in the Discord Developer Portal (Bot page -> Privileged Gateway Intents
+// -> Server Members Intent) or the bot will fail to log in with this intent
+// enabled here.
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMembers],
 });
 
 // Categories to always leave out of /channel-index posts — matched by ID,
@@ -46,62 +91,7 @@ const EXCLUDED_CATEGORY_IDS = [
 // Use this for one-off channels (right-click the channel -> Copy Channel ID).
 const EXCLUDED_CHANNEL_IDS = [
   '1533592609623376095',
-  '1520163360606261288',
-  '1524248909013319781',
-  '1522050201538265099',
-  '1522056203138764971',
-  '1522453146486575196',
-  '1522918807285530745',
-  '1523688048561225768',
-  '1527071150121685172',
-  '1529904624767602901',
-  '1520729269087506534',
-  '1531770010136215602',
-  '1532107616673861834',
-  '1532117032902983880',
-  '1532800372979138592',
-  '1532812512607731923',
-  '1508218846769578246',
-  '1510678526087659590',
-  '1524605236801699923',
-  '1524614965074464858',
-  '1524615350749106336',
-  '1495554128599056524',
-  '1495554206936072432',
-  '1516280215897247906',
-  '1521284113741385960',
-  '1524403215213396028',
-  '1531986003219320922',
-  '1519762749058584636',
-  '1495553806421983262',
-  '1495553933949800639',
-  '1495554006104145941',
-  '1495554063192948797',
-  '1533479251729453066',
-  '1491731146910863450',
-  '1491253285070573620',
-  '1491731275038331061',
-  '1491730897249243136',
-  '1522171628509990984',
-  '1532586175791890532',
-  '1531967288519954482',
-  '1529727284259459175',
-  '1522178212174495794',
-  '1521955739797688521', 
-  '1517124329970598100',
-  '1519141748507414628',
-  '1519142187663757493',
-  '1533402418425892934',
-  '1522370333129310288',
-  '1532873914210844893',
-  '1531203296595804170',
-  '1532734139818574056',
-  '1518798228873674903',
-  '1529699257118888078',
-  '1530774680418386090',
-  '1517124477794910338',
-  '1530703669048246272',
-  '1521265292070752286', 
+  '1521265292070752286',
 ];
 
 // Individual channels to always leave out, matched by a keyword anywhere
@@ -142,6 +132,17 @@ const commands = [
         .setName('user')
         .setDescription('The user to look up (pick from list or paste their ID)')
         .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName('camera-policy')
+    .setDescription('Turn the cameras-on voice channel policy on or off')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addStringOption((opt) =>
+      opt
+        .setName('state')
+        .setDescription('Turn the policy on or off')
+        .setRequired(true)
+        .addChoices({ name: 'On', value: 'on' }, { name: 'Off', value: 'off' })
     ),
 ].map((cmd) => cmd.toJSON());
 
@@ -293,6 +294,28 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.editReply({ embeds: [embed] });
     }
 
+    if (interaction.commandName === 'camera-policy') {
+      const desiredState = interaction.options.getString('state'); // 'on' or 'off'
+      cameraPolicyEnabled = desiredState === 'on';
+      saveCameraPolicyEnabled(cameraPolicyEnabled);
+
+      if (!cameraPolicyEnabled) {
+        // Clear any warnings currently in flight so nobody gets moved out
+        // after the policy's been switched off
+        for (const [memberId, info] of warnedUsers.entries()) {
+          clearTimeout(info.timeoutId);
+        }
+        warnedUsers.clear();
+      }
+
+      await interaction.reply({
+        content: cameraPolicyEnabled
+          ? '📷 Cameras-on policy is now **ON** — camera required in monitored voice channels.'
+          : '📴 Cameras-on policy is now **OFF** — no camera enforcement until turned back on.',
+        ephemeral: false,
+      });
+    }
+
     if (interaction.commandName === 'channel-index') {
       await interaction.deferReply();
       const categoryFilter = interaction.options.getString('category');
@@ -387,6 +410,82 @@ client.on('interactionCreate', async (interaction) => {
       // If we can't even respond (e.g. interaction expired), just log and move on
       console.error('Could not send error response to Discord:', followUpErr.message);
     }
+  }
+});
+
+// ---- Cameras-On voice channel policy ----
+async function handleCameraOff(member, channel) {
+  // Don't double-warn someone who's already got an active warning running
+  if (warnedUsers.has(member.id)) return;
+
+  try {
+    const minutes = Math.round(CAMERA_WARNING_TIMEOUT_MS / 60000);
+    const warningMessage = await member.send(
+      `📷 Please enable your camera in **${channel.name}** within the next ${minutes} minute(s), or you'll be moved out of the channel.`
+    );
+
+    const timeoutId = setTimeout(async () => {
+      try {
+        // Re-check current voice state right before acting — they may have
+        // left the channel entirely, or moved elsewhere, since the warning fired
+        const currentVoiceChannel = member.voice?.channel;
+        const stillInMonitoredChannel = currentVoiceChannel && CAMERA_ON_CHANNEL_IDS.includes(currentVoiceChannel.id);
+
+        if (stillInMonitoredChannel && !member.voice.selfVideo) {
+          await member.voice.disconnect('Camera not enabled within the warning period');
+          await member.send(`❌ You were moved out of **${channel.name}** for not enabling your camera. Feel free to rejoin with your camera on!`);
+        }
+      } catch (err) {
+        console.error('Error enforcing camera-off timeout:', err.message);
+      } finally {
+        warnedUsers.delete(member.id);
+      }
+    }, CAMERA_WARNING_TIMEOUT_MS);
+
+    warnedUsers.set(member.id, { timeoutId, warningMessage });
+  } catch (err) {
+    // Most common cause: the member has DMs closed to non-friends
+    console.error(`Could not DM ${member.user.tag} about camera policy:`, err.message);
+  }
+}
+
+async function clearWarning(memberId) {
+  const info = warnedUsers.get(memberId);
+  if (!info) return;
+
+  clearTimeout(info.timeoutId);
+  warnedUsers.delete(memberId);
+
+  try {
+    await info.warningMessage.edit('✅ Thanks for turning your camera on!');
+  } catch (err) {
+    console.error('Could not edit warning message:', err.message);
+  }
+}
+
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  if (!cameraPolicyEnabled) return;
+
+  const channelId = newState.channelId;
+  if (!channelId || !CAMERA_ON_CHANNEL_IDS.includes(channelId)) {
+    // They're not in (or just left) a monitored channel — if they had an
+    // active warning running, clear it so it doesn't fire after they've left
+    if (!newState.channelId && warnedUsers.has(newState.member.id)) {
+      clearWarning(newState.member.id);
+    }
+    return;
+  }
+
+  const member = newState.member;
+  const channel = newState.channel;
+  const cameraIsOn = newState.selfVideo;
+
+  if (!cameraIsOn) {
+    // Either just joined with camera off, or was already in and turned it off
+    await handleCameraOff(member, channel);
+  } else if (cameraIsOn && warnedUsers.has(member.id)) {
+    // They turned their camera on after being warned
+    await clearWarning(member.id);
   }
 });
 
