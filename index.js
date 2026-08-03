@@ -63,25 +63,37 @@ const CAMERA_EXEMPT_ROLE_IDS = [
 ];
 const warnedUsers = new Map(); // userId -> { timeoutId, warningMessage }
 
-// Whether the Cameras-On policy is currently active. Persisted to a small
-// file so a restart (e.g. a Railway redeploy) doesn't silently turn it back
-// on if you'd switched it off.
+// Whether the Cameras-On policy is currently active — PER SERVER, so one
+// server's admin toggling it off doesn't affect any other server the bot
+// is in. Persisted to a small file so a restart (e.g. a Railway redeploy)
+// doesn't silently reset anyone's setting.
 const CAMERA_POLICY_STATE_FILE = 'camera-policy-state.json';
 
-function loadCameraPolicyEnabled() {
+function loadCameraPolicyState() {
   try {
     const raw = fs.readFileSync(CAMERA_POLICY_STATE_FILE, 'utf-8');
-    return JSON.parse(raw).enabled;
+    return JSON.parse(raw); // { [guildId]: true/false }
   } catch {
-    return true; // default: on, if no state file exists yet
+    return {};
   }
 }
 
-function saveCameraPolicyEnabled(enabled) {
-  fs.writeFileSync(CAMERA_POLICY_STATE_FILE, JSON.stringify({ enabled }, null, 2));
+function saveCameraPolicyState(state) {
+  fs.writeFileSync(CAMERA_POLICY_STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-let cameraPolicyEnabled = loadCameraPolicyEnabled();
+// In-memory copy, loaded once at startup and kept in sync with the file
+let cameraPolicyState = loadCameraPolicyState();
+
+function isCameraPolicyEnabled(guildId) {
+  // Default to ON for any server that hasn't explicitly set it yet
+  return cameraPolicyState[guildId] !== false;
+}
+
+function setCameraPolicyEnabled(guildId, enabled) {
+  cameraPolicyState[guildId] = enabled;
+  saveCameraPolicyState(cameraPolicyState);
+}
 
 // GuildMembers is a PRIVILEGED intent — you must turn it on for this bot
 // in the Discord Developer Portal (Bot page -> Privileged Gateway Intents
@@ -162,13 +174,15 @@ const commands = [
     ),
 ].map((cmd) => cmd.toJSON());
 
-// ---- Register slash commands with Discord (guild-scoped = instant, not global) ----
+// ---- Register slash commands with Discord (GLOBAL = works in every server
+// the bot is in, not just this one — takes up to ~1 hour to first propagate
+// after a change, unlike guild-scoped registration which was instant) ----
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
+  await rest.put(Routes.applicationCommands(client.user.id), {
     body: commands,
   });
-  console.log('Slash commands registered.');
+  console.log('Slash commands registered globally (may take up to ~1hr to appear on a first-time change).');
 }
 
 // ---- Build the channel list data ----
@@ -312,20 +326,23 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.commandName === 'camera-policy') {
       const desiredState = interaction.options.getString('state'); // 'on' or 'off'
-      cameraPolicyEnabled = desiredState === 'on';
-      saveCameraPolicyEnabled(cameraPolicyEnabled);
+      const enabled = desiredState === 'on';
+      setCameraPolicyEnabled(interaction.guildId, enabled);
 
-      if (!cameraPolicyEnabled) {
-        // Clear any warnings currently in flight so nobody gets moved out
-        // after the policy's been switched off
-        for (const [memberId, info] of warnedUsers.entries()) {
-          clearTimeout(info.timeoutId);
+      if (!enabled) {
+        // Clear any warnings currently in flight FOR THIS SERVER ONLY, so
+        // nobody gets moved out after the policy's been switched off here —
+        // doesn't touch other servers' active warnings
+        for (const [key, info] of warnedUsers.entries()) {
+          if (key.startsWith(`${interaction.guildId}:`)) {
+            clearTimeout(info.timeoutId);
+            warnedUsers.delete(key);
+          }
         }
-        warnedUsers.clear();
       }
 
       await interaction.reply({
-        content: cameraPolicyEnabled
+        content: enabled
           ? '📷 Cameras-on policy is now **ON** — camera required in monitored voice channels.'
           : '📴 Cameras-on policy is now **OFF** — no camera enforcement until turned back on.',
         ephemeral: false,
@@ -430,12 +447,18 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ---- Cameras-On voice channel policy ----
+function warnKey(guildId, userId) {
+  return `${guildId}:${userId}`;
+}
+
 async function handleCameraOff(member, channel) {
+  const key = warnKey(member.guild.id, member.id);
+
   // Don't double-warn someone who's already got an active warning running
-  if (warnedUsers.has(member.id)) return;
+  if (warnedUsers.has(key)) return;
 
   const now = Date.now();
-  const lastWarned = recentlyWarnedAt.get(member.id);
+  const lastWarned = recentlyWarnedAt.get(key);
   const withinCooldown = lastWarned && now - lastWarned < CAMERA_REWARN_COOLDOWN_MS;
 
   let warningMessage = null;
@@ -446,7 +469,7 @@ async function handleCameraOff(member, channel) {
       warningMessage = await member.send(
         `📷 Please enable your camera in **${channel.name}** within the next ${minutes} minute(s), or you'll be moved out of the channel.`
       );
-      recentlyWarnedAt.set(member.id, now);
+      recentlyWarnedAt.set(key, now);
     } else {
       // Skip the duplicate DM, but still track and enforce silently —
       // they can still get moved out if they leave the camera off
@@ -467,23 +490,24 @@ async function handleCameraOff(member, channel) {
       } catch (err) {
         console.error('Error enforcing camera-off timeout:', err.message);
       } finally {
-        warnedUsers.delete(member.id);
+        warnedUsers.delete(key);
       }
     }, CAMERA_WARNING_TIMEOUT_MS);
 
-    warnedUsers.set(member.id, { timeoutId, warningMessage });
+    warnedUsers.set(key, { timeoutId, warningMessage });
   } catch (err) {
     // Most common cause: the member has DMs closed to non-friends
     console.error(`Could not DM ${member.user.tag} about camera policy:`, err.message);
   }
 }
 
-async function clearWarning(memberId) {
-  const info = warnedUsers.get(memberId);
+async function clearWarning(guildId, userId) {
+  const key = warnKey(guildId, userId);
+  const info = warnedUsers.get(key);
   if (!info) return;
 
   clearTimeout(info.timeoutId);
-  warnedUsers.delete(memberId);
+  warnedUsers.delete(key);
 
   if (!info.warningMessage) return; // this warning cycle never sent a DM (cooldown-suppressed)
 
@@ -495,14 +519,17 @@ async function clearWarning(memberId) {
 }
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
-  if (!cameraPolicyEnabled) return;
+  const guildId = newState.guild.id;
+  if (!isCameraPolicyEnabled(guildId)) return;
 
   const channelId = newState.channelId;
+  const key = warnKey(guildId, newState.member.id);
+
   if (!channelId || !CAMERA_ON_CHANNEL_IDS.includes(channelId)) {
     // They're not in (or just left) a monitored channel — if they had an
     // active warning running, clear it so it doesn't fire after they've left
-    if (!newState.channelId && warnedUsers.has(newState.member.id)) {
-      clearWarning(newState.member.id);
+    if (!newState.channelId && warnedUsers.has(key)) {
+      clearWarning(guildId, newState.member.id);
     }
     return;
   }
@@ -515,16 +542,16 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   if (isExempt) {
     // Exempt members never get warned — but if they were already mid-warning
     // (e.g. a role was just added to them), clear it so it doesn't still fire
-    if (warnedUsers.has(member.id)) await clearWarning(member.id);
+    if (warnedUsers.has(key)) await clearWarning(guildId, member.id);
     return;
   }
 
   if (!cameraIsOn) {
     // Either just joined with camera off, or was already in and turned it off
     await handleCameraOff(member, channel);
-  } else if (cameraIsOn && warnedUsers.has(member.id)) {
+  } else if (cameraIsOn && warnedUsers.has(key)) {
     // They turned their camera on after being warned
-    await clearWarning(member.id);
+    await clearWarning(guildId, member.id);
   }
 });
 
