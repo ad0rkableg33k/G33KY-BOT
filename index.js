@@ -20,6 +20,17 @@ const DATA_DIR = process.env.DATA_DIR || '.';
 function dataPath(filename) {
   return path.join(DATA_DIR, filename);
 }
+
+// Make sure the data directory actually exists before anything tries to
+// write to it — also doubles as a diagnostic: if this logs an error, the
+// path Railway gave us isn't actually a mounted, writable directory.
+try {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  console.log(`Data directory ready: ${path.resolve(DATA_DIR)}`);
+} catch (err) {
+  console.error(`Could not create/access DATA_DIR (${DATA_DIR}):`, err.message);
+}
+
 const {
   Client,
   GatewayIntentBits,
