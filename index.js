@@ -2,12 +2,24 @@
 // - Exports every channel in the server to channels.json
 // - Registers a /channel-index slash command that posts a formatted
 //   list of channels (name + link) into whatever channel it's run in
+// - Enforces an optional, per-server "cameras-on" voice channel policy
 //
 // This script does NOT rename, delete, or modify any channels.
-// It only reads channel info and posts messages.
+// It only reads channel info, moves people out of voice when the camera
+// policy says to, and posts messages.
 
 require('dotenv').config();
 const fs = require('fs');
+const path = require('path');
+
+// Where persistent data files live. Locally this defaults to the current
+// folder, so nothing changes for local testing. On Railway, set DATA_DIR
+// to match your attached Volume's mount path (e.g. /data) so these files
+// survive redeploys instead of getting wiped every time.
+const DATA_DIR = process.env.DATA_DIR || '.';
+function dataPath(filename) {
+  return path.join(DATA_DIR, filename);
+}
 const {
   Client,
   GatewayIntentBits,
@@ -20,17 +32,96 @@ const {
 } = require('discord.js');
 
 const TOKEN = process.env.DISCORD_TOKEN;
-const GUILD_ID = process.env.GUILD_ID; // your server ID
+const GUILD_ID = process.env.GUILD_ID; // your primary server ID (used for startup convenience exports + seeding)
 
 if (!TOKEN || !GUILD_ID) {
   console.error('Missing DISCORD_TOKEN or GUILD_ID in your .env file.');
   process.exit(1);
 }
 
-// ---- Cameras-On policy config ----
-// Voice channels where members must have their camera on. Grabbed by
-// right-clicking each voice channel -> Copy Channel ID.
-const CAMERA_ON_CHANNEL_IDS = [
+// GuildMembers is a PRIVILEGED intent — you must turn it on for this bot
+// in the Discord Developer Portal (Bot page -> Privileged Gateway Intents
+// -> Server Members Intent) or the bot will fail to log in with this intent
+// enabled here.
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMembers],
+});
+
+// ============================================================
+// Cameras-On voice channel policy — PER-SERVER self-service config
+// ============================================================
+// Everything about the policy (on/off, which channels, which roles are
+// exempt, timing, and an optional announcement link) lives in one JSON
+// file, keyed by server ID, so every server the bot is in manages its own
+// setup independently via slash commands — no code edits needed.
+
+const CAMERA_CONFIG_FILE = dataPath('camera-config.json');
+const DEFAULT_GRACE_MINUTES = 2; // silent period before the first reminder
+const DEFAULT_WARNING_MINUTES = 3; // time after the reminder before removal
+
+function loadCameraConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(CAMERA_CONFIG_FILE, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveCameraConfig(config) {
+  fs.writeFileSync(CAMERA_CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+let cameraConfig = loadCameraConfig();
+
+function ensureGuildConfig(guildId) {
+  if (!cameraConfig[guildId]) {
+    cameraConfig[guildId] = {
+      enabled: true,
+      monitoredChannels: [],
+      exemptRoles: [],
+      graceMinutes: DEFAULT_GRACE_MINUTES,
+      warningMinutes: DEFAULT_WARNING_MINUTES,
+      announcementUrl: null,
+    };
+  }
+  return cameraConfig[guildId];
+}
+
+function isCameraPolicyEnabled(guildId) {
+  return ensureGuildConfig(guildId).enabled !== false;
+}
+
+function setCameraPolicyEnabled(guildId, enabled) {
+  ensureGuildConfig(guildId).enabled = enabled;
+  saveCameraConfig(cameraConfig);
+}
+
+function getMonitoredChannels(guildId) {
+  return ensureGuildConfig(guildId).monitoredChannels;
+}
+
+function getExemptRoles(guildId) {
+  return ensureGuildConfig(guildId).exemptRoles;
+}
+
+function getTiming(guildId) {
+  const c = ensureGuildConfig(guildId);
+  return {
+    graceMinutes: c.graceMinutes ?? DEFAULT_GRACE_MINUTES,
+    warningMinutes: c.warningMinutes ?? DEFAULT_WARNING_MINUTES,
+  };
+}
+
+function getAnnouncementUrl(guildId) {
+  return ensureGuildConfig(guildId).announcementUrl || null;
+}
+
+// ---- One-time migration/seed for xXOnlineStatusXx ----
+// These were the previously hardcoded values. Kept only as a seed so
+// nothing breaks/resets the first time this update runs. After that,
+// camera-config.json is the live source of truth and these are unused.
+const SEED_GUILD_ID = GUILD_ID;
+const SEED_MONITORED_CHANNELS = [
   '1492754497305575524',
   '1508940784764846165',
   '1519414974882119871',
@@ -44,65 +135,37 @@ const CAMERA_ON_CHANNEL_IDS = [
   '1491289471596101692',
   '1491289586201006084',
 ];
-const CAMERA_WARNING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const SEED_EXEMPT_ROLES = ['1522494914255126559', '1491315204162850858', '1491333963023650826'];
+const SEED_ANNOUNCEMENT_URL = 'https://discord.com/channels/1491220089398235218/1530781873415127060/1534000463022784552';
 
-// If someone quickly toggles their camera off/on/off, this prevents sending
-// a fresh DM every single time. Within this window after their last warning,
-// re-triggering a camera-off still gets tracked and enforced (they can still
-// be moved out if they leave it off), just without a duplicate DM.
-const CAMERA_REWARN_COOLDOWN_MS = 60 * 1000; // 1 minute
-const recentlyWarnedAt = new Map(); // userId -> timestamp of last DM sent
+function seedCameraConfigIfNeeded() {
+  const isFirstRun = Object.keys(cameraConfig).length === 0;
+  if (!isFirstRun || !SEED_GUILD_ID) return;
 
-// Members with ANY of these roles are exempt from the cameras-on policy
-// entirely — they can be in a monitored channel with camera off and never
-// get warned or moved. Right-click a role in Server Settings -> Roles
-// (or right-click a member and check their roles) to grab a role's ID.
-const CAMERA_EXEMPT_ROLE_IDS = [
-  '1522494914255126559',
-  '1491315204162850858',
-  '1491333963023650826',
-];
-const warnedUsers = new Map(); // userId -> { timeoutId, warningMessage }
-
-// Whether the Cameras-On policy is currently active — PER SERVER, so one
-// server's admin toggling it off doesn't affect any other server the bot
-// is in. Persisted to a small file so a restart (e.g. a Railway redeploy)
-// doesn't silently reset anyone's setting.
-const CAMERA_POLICY_STATE_FILE = 'camera-policy-state.json';
-
-function loadCameraPolicyState() {
+  // Best-effort: respect the old separate on/off file if it happens to exist
+  let enabled = true;
   try {
-    const raw = fs.readFileSync(CAMERA_POLICY_STATE_FILE, 'utf-8');
-    return JSON.parse(raw); // { [guildId]: true/false }
+    const old = JSON.parse(fs.readFileSync(dataPath('camera-policy-state.json'), 'utf-8'));
+    if (typeof old[SEED_GUILD_ID] === 'boolean') enabled = old[SEED_GUILD_ID];
   } catch {
-    return {};
+    // no old file, or unreadable — default to enabled
   }
+
+  cameraConfig[SEED_GUILD_ID] = {
+    enabled,
+    monitoredChannels: [...SEED_MONITORED_CHANNELS],
+    exemptRoles: [...SEED_EXEMPT_ROLES],
+    graceMinutes: DEFAULT_GRACE_MINUTES,
+    warningMinutes: DEFAULT_WARNING_MINUTES,
+    announcementUrl: SEED_ANNOUNCEMENT_URL,
+  };
+  saveCameraConfig(cameraConfig);
+  console.log('Seeded camera-config.json with the original xXOnlineStatusXx settings.');
 }
 
-function saveCameraPolicyState(state) {
-  fs.writeFileSync(CAMERA_POLICY_STATE_FILE, JSON.stringify(state, null, 2));
-}
-
-// In-memory copy, loaded once at startup and kept in sync with the file
-let cameraPolicyState = loadCameraPolicyState();
-
-function isCameraPolicyEnabled(guildId) {
-  // Default to ON for any server that hasn't explicitly set it yet
-  return cameraPolicyState[guildId] !== false;
-}
-
-function setCameraPolicyEnabled(guildId, enabled) {
-  cameraPolicyState[guildId] = enabled;
-  saveCameraPolicyState(cameraPolicyState);
-}
-
-// GuildMembers is a PRIVILEGED intent — you must turn it on for this bot
-// in the Discord Developer Portal (Bot page -> Privileged Gateway Intents
-// -> Server Members Intent) or the bot will fail to log in with this intent
-// enabled here.
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMembers],
-});
+// ============================================================
+// /channel-index config (unrelated to the camera policy above)
+// ============================================================
 
 // Categories to always leave out of /channel-index posts — matched by ID,
 // not name, since stylized/fancy-font category names don't reliably match
@@ -173,6 +236,78 @@ const commands = [
         .setRequired(true)
         .addChoices({ name: 'On', value: 'on' }, { name: 'Off', value: 'off' })
     ),
+  new SlashCommandBuilder()
+    .setName('camera-monitor')
+    .setDescription('Manage which voice channels enforce the cameras-on policy in this server')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((sub) =>
+      sub
+        .setName('add')
+        .setDescription('Start monitoring a voice channel')
+        .addChannelOption((opt) => opt.setName('channel').setDescription('The voice channel to monitor').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('remove')
+        .setDescription('Stop monitoring a voice channel')
+        .addChannelOption((opt) => opt.setName('channel').setDescription('The voice channel to stop monitoring').setRequired(true))
+    )
+    .addSubcommand((sub) => sub.setName('list').setDescription('List all monitored voice channels in this server')),
+  new SlashCommandBuilder()
+    .setName('camera-exempt-role')
+    .setDescription('Manage which roles are exempt from the cameras-on policy in this server')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((sub) =>
+      sub
+        .setName('add')
+        .setDescription('Exempt a role from the camera policy')
+        .addRoleOption((opt) => opt.setName('role').setDescription('The role to exempt').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('remove')
+        .setDescription("Remove a role's exemption")
+        .addRoleOption((opt) => opt.setName('role').setDescription('The role to un-exempt').setRequired(true))
+    )
+    .addSubcommand((sub) => sub.setName('list').setDescription('List all exempt roles in this server')),
+  new SlashCommandBuilder()
+    .setName('camera-timing')
+    .setDescription('Configure camera policy timing for this server')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((sub) =>
+      sub
+        .setName('set')
+        .setDescription('Set the grace period and warning period')
+        .addIntegerOption((opt) =>
+          opt
+            .setName('grace_minutes')
+            .setDescription('Silent period before the first reminder (minutes)')
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(60)
+        )
+        .addIntegerOption((opt) =>
+          opt
+            .setName('warning_minutes')
+            .setDescription('Time after the reminder before removal (minutes)')
+            .setRequired(true)
+            .setMinValue(1)
+            .setMaxValue(60)
+        )
+    )
+    .addSubcommand((sub) => sub.setName('view').setDescription('View current timing settings')),
+  new SlashCommandBuilder()
+    .setName('camera-announcement')
+    .setDescription('Set a link to your camera policy announcement, included in reminders')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((sub) =>
+      sub
+        .setName('set')
+        .setDescription('Set the announcement link')
+        .addStringOption((opt) => opt.setName('url').setDescription('Link to your policy announcement post').setRequired(true))
+    )
+    .addSubcommand((sub) => sub.setName('clear').setDescription('Remove the announcement link'))
+    .addSubcommand((sub) => sub.setName('view').setDescription('View the current announcement link')),
 ].map((cmd) => cmd.toJSON());
 
 // ---- Register slash commands with Discord (GLOBAL = works in every server
@@ -207,11 +342,13 @@ function getChannelData(guild, categoryFilter = null) {
   return channels;
 }
 
+const CHANNELS_FILE = dataPath('channels.json');
+
 // ---- Export to local channels.json ----
 function exportToFile(guild) {
   const data = getChannelData(guild);
-  fs.writeFileSync('channels.json', JSON.stringify(data, null, 2));
-  console.log(`Wrote ${data.length} channels to channels.json`);
+  fs.writeFileSync(CHANNELS_FILE, JSON.stringify(data, null, 2));
+  console.log(`Wrote ${data.length} channels to ${CHANNELS_FILE}`);
   return data;
 }
 
@@ -220,7 +357,7 @@ function exportToFile(guild) {
 // name in different categories never collide. Each entry also stores the
 // channel's current name so the file stays readable when you're editing it
 // by hand — you can see at a glance which ID belongs to which channel.
-const DESCRIPTIONS_FILE = 'descriptions.json';
+const DESCRIPTIONS_FILE = dataPath('descriptions.json');
 
 function ensureDescriptionsFile(guild) {
   if (fs.existsSync(DESCRIPTIONS_FILE)) return; // never overwrite your edits
@@ -246,6 +383,7 @@ function loadDescriptions() {
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await registerCommands();
+  seedCameraConfigIfNeeded();
 
   // Also do a one-time export to file on startup, so you get channels.json
   // immediately without needing to run a slash command first.
@@ -267,7 +405,7 @@ client.on('interactionCreate', async (interaction) => {
       const data = exportToFile(interaction.guild);
       await interaction.editReply({
         content: `Exported ${data.length} channels.`,
-        files: ['channels.json'],
+        files: [CHANNELS_FILE],
       });
     }
 
@@ -336,7 +474,8 @@ client.on('interactionCreate', async (interaction) => {
         // doesn't touch other servers' active warnings
         for (const [key, info] of warnedUsers.entries()) {
           if (key.startsWith(`${interaction.guildId}:`)) {
-            clearTimeout(info.timeoutId);
+            if (info.graceTimeoutId) clearTimeout(info.graceTimeoutId);
+            if (info.warnTimeoutId) clearTimeout(info.warnTimeoutId);
             warnedUsers.delete(key);
           }
         }
@@ -348,6 +487,115 @@ client.on('interactionCreate', async (interaction) => {
           : '📴 Cameras-on policy is now **OFF** — no camera enforcement until turned back on.',
         ephemeral: false,
       });
+    }
+
+    if (interaction.commandName === 'camera-monitor') {
+      const sub = interaction.options.getSubcommand();
+      const guildConfig = ensureGuildConfig(interaction.guildId);
+
+      if (sub === 'add') {
+        const channel = interaction.options.getChannel('channel');
+        if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildStageVoice) {
+          await interaction.reply({ content: '❌ That needs to be a voice channel.', ephemeral: true });
+        } else if (guildConfig.monitoredChannels.includes(channel.id)) {
+          await interaction.reply({ content: `**#${channel.name}** is already being monitored.`, ephemeral: true });
+        } else {
+          guildConfig.monitoredChannels.push(channel.id);
+          saveCameraConfig(cameraConfig);
+          await interaction.reply(`✅ Now monitoring **#${channel.name}** for the cameras-on policy.`);
+        }
+      } else if (sub === 'remove') {
+        const channel = interaction.options.getChannel('channel');
+        if (!guildConfig.monitoredChannels.includes(channel.id)) {
+          await interaction.reply({ content: `**#${channel.name}** wasn't being monitored.`, ephemeral: true });
+        } else {
+          guildConfig.monitoredChannels = guildConfig.monitoredChannels.filter((id) => id !== channel.id);
+          saveCameraConfig(cameraConfig);
+          await interaction.reply(`✅ Stopped monitoring **#${channel.name}**.`);
+        }
+      } else if (sub === 'list') {
+        if (guildConfig.monitoredChannels.length === 0) {
+          await interaction.reply({ content: 'No voice channels are currently being monitored in this server.', ephemeral: true });
+        } else {
+          const list = guildConfig.monitoredChannels.map((id) => `<#${id}>`).join('\n');
+          await interaction.reply({ content: `**Monitored voice channels:**\n${list}`, ephemeral: true });
+        }
+      }
+    }
+
+    if (interaction.commandName === 'camera-exempt-role') {
+      const sub = interaction.options.getSubcommand();
+      const guildConfig = ensureGuildConfig(interaction.guildId);
+
+      if (sub === 'add') {
+        const role = interaction.options.getRole('role');
+        if (guildConfig.exemptRoles.includes(role.id)) {
+          await interaction.reply({ content: `**${role.name}** is already exempt.`, ephemeral: true });
+        } else {
+          guildConfig.exemptRoles.push(role.id);
+          saveCameraConfig(cameraConfig);
+          await interaction.reply(`✅ **${role.name}** is now exempt from the cameras-on policy.`);
+        }
+      } else if (sub === 'remove') {
+        const role = interaction.options.getRole('role');
+        if (!guildConfig.exemptRoles.includes(role.id)) {
+          await interaction.reply({ content: `**${role.name}** wasn't exempt.`, ephemeral: true });
+        } else {
+          guildConfig.exemptRoles = guildConfig.exemptRoles.filter((id) => id !== role.id);
+          saveCameraConfig(cameraConfig);
+          await interaction.reply(`✅ **${role.name}** is no longer exempt.`);
+        }
+      } else if (sub === 'list') {
+        if (guildConfig.exemptRoles.length === 0) {
+          await interaction.reply({ content: 'No roles are currently exempt in this server.', ephemeral: true });
+        } else {
+          const list = guildConfig.exemptRoles.map((id) => `<@&${id}>`).join('\n');
+          await interaction.reply({ content: `**Exempt roles:**\n${list}`, ephemeral: true });
+        }
+      }
+    }
+
+    if (interaction.commandName === 'camera-timing') {
+      const sub = interaction.options.getSubcommand();
+      const guildConfig = ensureGuildConfig(interaction.guildId);
+
+      if (sub === 'set') {
+        const grace = interaction.options.getInteger('grace_minutes');
+        const warning = interaction.options.getInteger('warning_minutes');
+        guildConfig.graceMinutes = grace;
+        guildConfig.warningMinutes = warning;
+        saveCameraConfig(cameraConfig);
+        await interaction.reply(
+          `✅ Updated timing: **${grace} minute(s)** silent grace period, then **${warning} minute(s)** after the reminder before removal (total **${grace + warning} minute(s)**).`
+        );
+      } else if (sub === 'view') {
+        const { graceMinutes, warningMinutes } = getTiming(interaction.guildId);
+        await interaction.reply({
+          content: `**Grace period:** ${graceMinutes} minute(s)\n**Warning period:** ${warningMinutes} minute(s)\n**Total time before removal:** ${graceMinutes + warningMinutes} minute(s)`,
+          ephemeral: true,
+        });
+      }
+    }
+
+    if (interaction.commandName === 'camera-announcement') {
+      const sub = interaction.options.getSubcommand();
+      const guildConfig = ensureGuildConfig(interaction.guildId);
+
+      if (sub === 'set') {
+        const url = interaction.options.getString('url');
+        guildConfig.announcementUrl = url;
+        saveCameraConfig(cameraConfig);
+        await interaction.reply(`✅ Announcement link set — it'll now be included in camera policy reminders.`);
+      } else if (sub === 'clear') {
+        guildConfig.announcementUrl = null;
+        saveCameraConfig(cameraConfig);
+        await interaction.reply(`✅ Announcement link cleared.`);
+      } else if (sub === 'view') {
+        await interaction.reply({
+          content: guildConfig.announcementUrl ? `Current announcement link:\n${guildConfig.announcementUrl}` : 'No announcement link is set for this server.',
+          ephemeral: true,
+        });
+      }
     }
 
     if (interaction.commandName === 'channel-index') {
@@ -369,7 +617,6 @@ client.on('interactionCreate', async (interaction) => {
         if (!byCategory[key]) byCategory[key] = [];
         byCategory[key].push(ch);
       }
-
 
       // Discord's 6000-character limit applies to the COMBINED total across
       // all embeds within a single message (not per-embed). To sidestep that
@@ -447,75 +694,101 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ---- Cameras-On voice channel policy ----
+// ============================================================
+// Cameras-On voice channel policy — enforcement
+// ============================================================
+// Two-stage, low-noise design:
+//   1. Camera goes off in a monitored channel -> a SILENT grace period
+//      starts (default 2 min). Nothing is sent yet — this absorbs brief
+//      flickers/reconnects without ever pinging anyone.
+//   2. If still off when the grace period ends -> ONE reminder is posted
+//      in the voice channel's own text chat (an @ping, not a DM), and a
+//      second timer starts (default 3 min).
+//   3. If still off when that timer ends -> they're disconnected from
+//      voice and a short follow-up message is posted.
+// Turning the camera on at any point cancels everything for that cycle.
+// Turning it off again later starts a completely fresh cycle (matches
+// "the timer will reset and you'll receive another reminder").
+
+const warnedUsers = new Map(); // "guildId:userId" -> { stage: 'grace'|'warned', graceTimeoutId?, warnTimeoutId?, channel }
+
 function warnKey(guildId, userId) {
   return `${guildId}:${userId}`;
 }
 
-async function handleCameraOff(member, channel) {
-  const key = warnKey(member.guild.id, member.id);
-
-  // Don't double-warn someone who's already got an active warning running
-  if (warnedUsers.has(key)) return;
-
-  const now = Date.now();
-  const lastWarned = recentlyWarnedAt.get(key);
-  const withinCooldown = lastWarned && now - lastWarned < CAMERA_REWARN_COOLDOWN_MS;
-
-  let warningMessage = null;
-
-  try {
-    if (!withinCooldown) {
-      const minutes = Math.round(CAMERA_WARNING_TIMEOUT_MS / 60000);
-      warningMessage = await member.send(
-        `📷 Please enable your camera in **${channel.name}** within the next ${minutes} minute(s), or you'll be moved out of the channel.`
-      );
-      recentlyWarnedAt.set(key, now);
-    } else {
-      // Skip the duplicate DM, but still track and enforce silently —
-      // they can still get moved out if they leave the camera off
-      console.log(`Skipping duplicate DM for ${member.user.tag} (rewarn cooldown active)`);
-    }
-
-    const timeoutId = setTimeout(async () => {
-      try {
-        // Re-check current voice state right before acting — they may have
-        // left the channel entirely, or moved elsewhere, since the warning fired
-        const currentVoiceChannel = member.voice?.channel;
-        const stillInMonitoredChannel = currentVoiceChannel && CAMERA_ON_CHANNEL_IDS.includes(currentVoiceChannel.id);
-
-        if (stillInMonitoredChannel && !member.voice.selfVideo) {
-          await member.voice.disconnect('Camera not enabled within the warning period');
-          await member.send(`❌ You were moved out of **${channel.name}** for not enabling your camera. Feel free to rejoin with your camera on!`);
-        }
-      } catch (err) {
-        console.error('Error enforcing camera-off timeout:', err.message);
-      } finally {
-        warnedUsers.delete(key);
-      }
-    }, CAMERA_WARNING_TIMEOUT_MS);
-
-    warnedUsers.set(key, { timeoutId, warningMessage });
-  } catch (err) {
-    // Most common cause: the member has DMs closed to non-friends
-    console.error(`Could not DM ${member.user.tag} about camera policy:`, err.message);
-  }
+function announcementLine(guildId) {
+  const url = getAnnouncementUrl(guildId);
+  return url ? `\n🔗 Policy details: <${url}>` : '';
 }
 
-async function clearWarning(guildId, userId) {
+async function handleCameraOff(member, channel) {
+  const guildId = member.guild.id;
+  const key = warnKey(guildId, member.id);
+
+  // Already mid-cycle (grace or warned) — don't restart it
+  if (warnedUsers.has(key)) return;
+
+  const { graceMinutes, warningMinutes } = getTiming(guildId);
+  const graceMs = graceMinutes * 60 * 1000;
+  const warnMs = warningMinutes * 60 * 1000;
+
+  const graceTimeoutId = setTimeout(async () => {
+    try {
+      const currentVoiceChannel = member.voice?.channel;
+      const stillInMonitoredChannel = currentVoiceChannel && getMonitoredChannels(guildId).includes(currentVoiceChannel.id);
+
+      if (!stillInMonitoredChannel || member.voice.selfVideo) {
+        warnedUsers.delete(key);
+        return;
+      }
+
+      await currentVoiceChannel.send(
+        `<@${member.id}> 📷 Please enable your camera — you have **${warningMinutes} minute(s)** before you'll be moved out of ${currentVoiceChannel}.${announcementLine(guildId)}`
+      );
+
+      const warnTimeoutId = setTimeout(async () => {
+        try {
+          const cvc = member.voice?.channel;
+          const stillIn = cvc && getMonitoredChannels(guildId).includes(cvc.id);
+
+          if (stillIn && !member.voice.selfVideo) {
+            await member.voice.disconnect('Camera not enabled within the warning period');
+            await cvc.send(`<@${member.id}> ❌ You were moved out for not enabling your camera. Feel free to rejoin anytime with it on!`);
+          }
+        } catch (err) {
+          console.error('Error enforcing camera-off removal:', err.message);
+        } finally {
+          warnedUsers.delete(key);
+        }
+      }, warnMs);
+
+      warnedUsers.set(key, { stage: 'warned', warnTimeoutId, channel: currentVoiceChannel });
+    } catch (err) {
+      console.error('Error sending camera reminder:', err.message);
+      warnedUsers.delete(key);
+    }
+  }, graceMs);
+
+  warnedUsers.set(key, { stage: 'grace', graceTimeoutId, channel });
+}
+
+async function clearWarning(guildId, userId, { confirm = true } = {}) {
   const key = warnKey(guildId, userId);
   const info = warnedUsers.get(key);
   if (!info) return;
 
-  clearTimeout(info.timeoutId);
+  if (info.graceTimeoutId) clearTimeout(info.graceTimeoutId);
+  if (info.warnTimeoutId) clearTimeout(info.warnTimeoutId);
   warnedUsers.delete(key);
 
-  if (!info.warningMessage) return; // this warning cycle never sent a DM (cooldown-suppressed)
-
-  try {
-    await info.warningMessage.edit('✅ Thanks for turning your camera on!');
-  } catch (err) {
-    console.error('Could not edit warning message:', err.message);
+  // Only post a confirmation if we'd actually sent a reminder — no need to
+  // say anything if they turned the camera on during the silent grace period
+  if (confirm && info.stage === 'warned' && info.channel) {
+    try {
+      await info.channel.send(`<@${userId}> ✅ Thanks for turning your camera on!`);
+    } catch (err) {
+      console.error('Could not send camera confirmation:', err.message);
+    }
   }
 }
 
@@ -524,13 +797,13 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!isCameraPolicyEnabled(guildId)) return;
 
   const channelId = newState.channelId;
-  const key = warnKey(guildId, newState.member.id);
+  const memberId = newState.member.id;
 
-  if (!channelId || !CAMERA_ON_CHANNEL_IDS.includes(channelId)) {
-    // They're not in (or just left) a monitored channel — if they had an
-    // active warning running, clear it so it doesn't fire after they've left
-    if (!newState.channelId && warnedUsers.has(key)) {
-      clearWarning(guildId, newState.member.id);
+  if (!channelId || !getMonitoredChannels(guildId).includes(channelId)) {
+    // Left voice entirely, or moved to an unmonitored channel — clear
+    // silently (no "thanks!" message, since they're not even there anymore)
+    if (!newState.channelId) {
+      await clearWarning(guildId, memberId, { confirm: false });
     }
     return;
   }
@@ -538,21 +811,24 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const member = newState.member;
   const channel = newState.channel;
   const cameraIsOn = newState.selfVideo;
+  const key = warnKey(guildId, memberId);
 
-  const isExempt = member.roles.cache.some((role) => CAMERA_EXEMPT_ROLE_IDS.includes(role.id));
+  // If they moved between two monitored channels while already mid-cycle,
+  // keep the reminder/removal messages pointed at their CURRENT channel
+  if (warnedUsers.has(key)) {
+    warnedUsers.get(key).channel = channel;
+  }
+
+  const isExempt = member.roles.cache.some((role) => getExemptRoles(guildId).includes(role.id));
   if (isExempt) {
-    // Exempt members never get warned — but if they were already mid-warning
-    // (e.g. a role was just added to them), clear it so it doesn't still fire
-    if (warnedUsers.has(key)) await clearWarning(guildId, member.id);
+    await clearWarning(guildId, memberId, { confirm: false });
     return;
   }
 
   if (!cameraIsOn) {
-    // Either just joined with camera off, or was already in and turned it off
     await handleCameraOff(member, channel);
-  } else if (cameraIsOn && warnedUsers.has(key)) {
-    // They turned their camera on after being warned
-    await clearWarning(guildId, member.id);
+  } else {
+    await clearWarning(guildId, memberId, { confirm: true });
   }
 });
 

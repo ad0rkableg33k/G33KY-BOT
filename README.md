@@ -2,11 +2,12 @@
 
 Exports every channel in your server to `channels.json` and can post a
 formatted, categorized index (name + clickable link + topic) into any
-channel via a slash command.
+channel via a slash command. Also includes an optional, per-server
+"cameras-on" voice channel policy.
 
-This bot only **reads** channel info and **posts messages** — it does
-not rename, delete, or edit any channel. (Manage Channels permission is
-granted on the invite for future use, but nothing in this script uses it.)
+This bot only **reads** channel info and **posts messages** (plus, if the
+camera policy is turned on, disconnects people from voice who don't turn
+their camera on in time) — it does not rename, delete, or edit any channel.
 
 ## Setup
 
@@ -19,7 +20,7 @@ granted on the invite for future use, but nothing in this script uses it.)
 
 3. **Get your Server (Guild) ID**
    - In Discord, go to User Settings > Advanced > turn on Developer Mode
-   - Right-click your server icon (xXOnlineStatusXx) > Copy Server ID
+   - Right-click your server icon > Copy Server ID
 
 4. **Fill in your `.env` file**
    - Copy `.env.example` to a new file named `.env`
@@ -34,8 +35,8 @@ granted on the invite for future use, but nothing in this script uses it.)
    ```
    On startup it will:
    - Log in
-   - Register the slash commands to your server (instant, not the ~1hr
-     delay you get with global commands)
+   - Register the slash commands globally (may take up to ~1hr to first
+     appear after a change, then it's instant)
    - Write `channels.json` to this folder automatically
 
 ## Using it in Discord
@@ -76,72 +77,141 @@ with no blurb, same as before. This is completely separate from Discord's
 built-in channel Topic field, so nothing pulled from Discord (including any
 messy pinned templates in a channel's topic) will ever show up here.
 
-## Customizing further
-
 ## Stopping the bot
 
 `Ctrl+C` in the terminal. The bot only needs to run while you're actively
 using the slash commands — it doesn't need to stay online 24/7 unless you
 want the slash commands available any time.
 
+---
+
 ## Cameras-On voice channel policy
 
-The bot enforces a "camera must be on" rule in specific voice channels.
-If someone joins one of those channels (or turns their camera off while
-already in one), the bot DMs them a warning. If they don't turn their
-camera on within 5 minutes, they get moved out of the channel automatically.
-The monitored channel IDs are hard-coded near the top of `index.js` in
-`CAMERA_ON_CHANNEL_IDS` — edit that list directly to add or remove channels.
+A low-noise, two-stage system for encouraging active participation in
+voice chat, fully configurable per-server via slash commands — no code
+edits needed.
 
-**This feature needs two things enabled that the rest of the bot didn't:**
+**How it works, by default:**
+1. Someone joins a monitored voice channel (or turns their camera off
+   while already in one) with no camera → a **silent 2-minute grace
+   period** starts. Nothing is sent yet — this absorbs brief flickers,
+   bad connections, or someone just settling in, without ever pinging them.
+2. If the camera is still off after that → **one reminder** is posted
+   right in the voice channel's own text chat (an `@mention`, not a DM),
+   and a **3-minute** countdown starts.
+3. If the camera is still off after that → they're **disconnected** from
+   the voice channel, with a short follow-up message.
+4. Turning the camera on at any point cancels everything for that cycle.
+   A confirmation ("✅ Thanks for turning your camera on!") is only posted
+   if a reminder had actually gone out — turning it on during the silent
+   grace period is invisible, no message either way.
+5. Turning the camera off again later starts a completely fresh cycle —
+   full grace period, fresh reminder, fresh countdown.
 
-1. **Server Members Intent** — this is a "privileged" intent Discord makes
-   you turn on manually:
-   - Go to the Discord Developer Portal
-   - Your bot -> **Bot** page (left sidebar)
+**We switched from DMs to in-channel @pings** because members were finding
+the DMs intrusive. Pinging in the voice channel's own text chat (the chat
+panel built into every voice channel) keeps it visible in-context instead
+of landing in someone's private messages.
+
+### This feature needs two things enabled that the rest of the bot didn't
+
+1. **Server Members Intent** — a "privileged" intent Discord makes you
+   turn on manually:
+   - Discord Developer Portal → your bot → **Bot** page (left sidebar)
    - Scroll to **Privileged Gateway Intents**
    - Turn ON **"Server Members Intent"**
    - Save changes
 
-2. **Move Members permission** — the original bot invite didn't include
-   this, so you'll need to re-invite the bot with it added:
-   - Developer Portal -> your bot -> **OAuth2** -> **URL Generator**
-   - Scopes: `bot` and `applications.commands` (same as before)
-   - Bot Permissions: keep everything checked from before, and additionally
-     check **Move Members**
-   - Copy the new URL, open it, select xXOnlineStatusXx, Authorize again
+2. **Move Members permission** — needed to disconnect someone from voice.
+   If your bot's invite doesn't already include it:
+   - Developer Portal → your bot → **OAuth2** → **URL Generator**
+   - Scopes: `bot` and `applications.commands`
+   - Bot Permissions: everything you already have, plus **Move Members**
+   - Copy the new URL, open it, select your server, Authorize again
    - (Re-authorizing just updates the existing bot's permissions — no need
      to remove it first)
 
-If you skip step 1, the bot will fail to log in at all with an intent
-error. If you skip step 2, it'll DM the warning fine but fail (silently
-logged in the terminal) when it tries to actually move someone out.
+If you skip step 1, the bot fails to log in entirely with an intent error.
+If you skip step 2, reminders send fine but removal silently fails (logged
+in the terminal).
 
 ### Turning the policy on/off
 
-Use `/camera-policy state:Off` or `/camera-policy state:On` right in Discord
-— no restart needed. Only people with **Manage Server** permission can use
-this command. The setting is saved to `camera-policy-state.json` so it
-sticks even through a bot restart (e.g. a Railway redeploy won't silently
-turn it back on if you'd switched it off). Turning it off also immediately
-cancels any warnings currently in progress, so nobody gets moved out after
-the fact.
+`/camera-policy state:On` or `/camera-policy state:Off` — no restart
+needed. Requires **Manage Server** permission. Per-server — one server
+switching it off never affects another. Turning it off immediately cancels
+any reminders/countdowns currently in progress in that server.
 
-### Exempting roles from the camera policy
+### Choosing which voice channels to monitor
 
-Members with a role listed in `CAMERA_EXEMPT_ROLE_IDS` (near the top of
-`index.js`) skip the cameras-on enforcement entirely, no matter what channel
-they're in. To exempt a role: Server Settings -> Roles -> click the role ->
-there's a "Copy Role ID" option (or right-click the role in the member list
-sidebar) -> send the ID to Claude, or paste it directly into the list in
-`index.js`. No new Discord permissions are needed for this — it's a
-code-only change.
+- `/camera-monitor add channel:#voice-chat`
+- `/camera-monitor remove channel:#voice-chat`
+- `/camera-monitor list`
 
-### Anti-spam safeguard
+### Exempting roles
 
-If someone rapidly toggles their camera off/on/off, the bot won't send a
-fresh DM warning every single time — only once per minute
-(`CAMERA_REWARN_COOLDOWN_MS` near the top of `index.js`, adjustable). It
-still silently tracks and enforces the policy underneath, though — if they
-genuinely leave the camera off, they'll still get moved out on schedule,
-they just won't get spammed with a new DM for every quick flicker.
+For members who have legitimate reasons not to use a camera (anxiety,
+privacy, etc.) — exempt roles never get a reminder or get moved, no matter
+how long their camera's off.
+
+- `/camera-exempt-role add role:@Camera Exempt`
+- `/camera-exempt-role remove role:@Camera Exempt`
+- `/camera-exempt-role list`
+
+### Adjusting the timing
+
+Defaults are 2 minutes (silent grace) + 3 minutes (after the reminder) = 5
+minutes total before removal — matching the originally announced policy.
+Adjustable per server:
+
+- `/camera-timing set grace_minutes:2 warning_minutes:3`
+- `/camera-timing view`
+
+### Linking your policy announcement
+
+If you've posted an announcement explaining the policy (like the original
+xXOnlineStatusXx one), you can attach that link so it's automatically
+included at the bottom of every reminder message:
+
+- `/camera-announcement set url:https://discord.com/channels/...`
+- `/camera-announcement clear`
+- `/camera-announcement view`
+
+### Multi-server notes
+
+Every setting above (on/off, monitored channels, exempt roles, timing,
+announcement link) is stored **per server** in `camera-config.json`,
+keyed by server ID. A friend's server can set up and run its own
+completely independent camera policy without touching any code or
+affecting xXOnlineStatusXx's settings, and vice versa.
+
+xXOnlineStatusXx's original hardcoded channel/role list was automatically
+migrated into this file the first time this version ran, so nothing was
+lost or reset.
+
+### Important — Railway persistence
+
+`camera-config.json`, `channels.json`, and `descriptions.json` all live on
+local disk. Many hosting platforms (Railway included, by default) do NOT
+persist local files across redeploys — meaning every code push could wipe
+these files and reset to the seeded defaults, losing any settings servers
+configured via slash commands since the last deploy. The fix is attaching
+a Railway Volume (persistent disk) to the project. Ask Claude to walk
+through this setup if it hasn't been done yet, or if configured settings
+start disappearing after a push.
+
+### Setting up a Railway Volume (do this before pushing the update above)
+
+1. Open your project on Railway
+2. Right-click empty space on the project canvas (or press `Cmd/Ctrl+K` for
+   the command palette) and choose **"Create Volume"**
+3. Attach it to your bot's service
+4. Set the **mount path** to `/data`
+5. Go to your service → **Variables** tab → add a new variable:
+   - `DATA_DIR` = `/data`
+6. Redeploy (Railway will usually do this automatically after adding the
+   variable — check the Deployments tab)
+
+From then on, `camera-config.json`, `channels.json`, and `descriptions.json`
+will live on that persistent volume instead of the app's temporary
+filesystem, so they survive every future code push.

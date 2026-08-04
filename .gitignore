@@ -2,3 +2,4 @@ node_modules/
 .env
 channels.json
 camera-policy-state.json
+camera-config.json
