@@ -43,6 +43,11 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  RoleSelectMenuBuilder,
+  ChannelSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -87,10 +92,19 @@ function loadCameraConfig() {
 }
 
 function saveCameraConfig(config) {
-  fs.writeFileSync(CAMERA_CONFIG_FILE, JSON.stringify(config, null, 2));
+  try {
+    fs.writeFileSync(CAMERA_CONFIG_FILE, JSON.stringify(config, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`Failed to save camera-config.json to ${CAMERA_CONFIG_FILE}:`, err.message);
+    return false;
+  }
 }
 
 let cameraConfig = loadCameraConfig();
+for (const [guildId, cfg] of Object.entries(cameraConfig)) {
+  console.log(`[startup] Loaded camera-config.json for guild ${guildId}: enabled=${cfg.enabled}`);
+}
 
 function ensureGuildConfig(guildId) {
   if (!cameraConfig[guildId]) {
@@ -112,7 +126,7 @@ function isCameraPolicyEnabled(guildId) {
 
 function setCameraPolicyEnabled(guildId, enabled) {
   ensureGuildConfig(guildId).enabled = enabled;
-  saveCameraConfig(cameraConfig);
+  return saveCameraConfig(cameraConfig);
 }
 
 function getMonitoredChannels(guildId) {
@@ -208,7 +222,13 @@ function loadActivityConfig() {
 }
 
 function saveActivityConfig(config) {
-  fs.writeFileSync(ACTIVITY_CONFIG_FILE, JSON.stringify(config, null, 2));
+  try {
+    fs.writeFileSync(ACTIVITY_CONFIG_FILE, JSON.stringify(config, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`Failed to save activity-config.json to ${ACTIVITY_CONFIG_FILE}:`, err.message);
+    return false;
+  }
 }
 
 let activityConfig = loadActivityConfig();
@@ -403,6 +423,332 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ============================================================
+// Unified /setup menu — interactive wizard for camera policy +
+// activity tracker, so admins never have to type role/channel IDs or
+// remember subcommand names. Everything reuses the exact same config
+// objects/functions as the slash commands above — the menu is just
+// another way to edit the same camera-config.json / activity-config.json.
+// ============================================================
+
+function clearAllCameraWarningsForGuild(guildId) {
+  for (const [key, info] of warnedUsers.entries()) {
+    if (key.startsWith(`${guildId}:`)) {
+      if (info.graceTimeoutId) clearTimeout(info.graceTimeoutId);
+      if (info.warnTimeoutId) clearTimeout(info.warnTimeoutId);
+      warnedUsers.delete(key);
+    }
+  }
+}
+
+function buildMainMenuMessage() {
+  const embed = new EmbedBuilder()
+    .setColor(0x8a2be2)
+    .setTitle('⚙️ G33KY Bot Setup')
+    .setDescription('Pick what you want to configure. Everything here saves instantly — no need to type commands.');
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup:camera:menu').setLabel('📷 Camera Policy').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup:activity:menu').setLabel('📊 Activity Tracker').setStyle(ButtonStyle.Primary)
+  );
+
+  return { embeds: [embed], components: [row] };
+}
+
+function buildCameraMenuMessage(guildId) {
+  const cfg = ensureGuildConfig(guildId);
+
+  const embed = new EmbedBuilder()
+    .setColor(cfg.enabled ? 0x00cc66 : 0x999999)
+    .setTitle('📷 Camera Policy Setup')
+    .addFields(
+      { name: 'Status', value: cfg.enabled ? '🟢 ON' : '⚪ OFF', inline: true },
+      { name: 'Timing', value: `${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES}m grace + ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES}m warning`, inline: true },
+      { name: 'Announcement link', value: cfg.announcementUrl ? `[link](${cfg.announcementUrl})` : 'Not set', inline: true },
+      { name: 'Monitored channels', value: cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'None — pick some below' },
+      { name: 'Exempt roles', value: cfg.exemptRoles.length ? cfg.exemptRoles.map((id) => `<@&${id}>`).join(', ') : 'None' }
+    );
+
+  const channelSelect = new ChannelSelectMenuBuilder()
+    .setCustomId('setup:camera:channels:select')
+    .setPlaceholder('Monitored voice channels')
+    .setChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+    .setMinValues(0)
+    .setMaxValues(25);
+  if (cfg.monitoredChannels.length) channelSelect.setDefaultChannels(...cfg.monitoredChannels.slice(0, 25));
+
+  const roleSelect = new RoleSelectMenuBuilder()
+    .setCustomId('setup:camera:exempt:select')
+    .setPlaceholder('Exempt roles')
+    .setMinValues(0)
+    .setMaxValues(25);
+  if (cfg.exemptRoles.length) roleSelect.setDefaultRoles(...cfg.exemptRoles.slice(0, 25));
+
+  const buttonRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('setup:camera:toggle')
+      .setLabel(cfg.enabled ? 'Turn OFF' : 'Turn ON')
+      .setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup:camera:timing').setLabel('Timing').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:camera:announcement').setLabel('Announcement Link').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary)
+  );
+
+  return {
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(channelSelect), new ActionRowBuilder().addComponents(roleSelect), buttonRow],
+  };
+}
+
+function buildActivityMenuMessage(guildId) {
+  const cfg = ensureActivityGuildConfig(guildId);
+
+  const embed = new EmbedBuilder()
+    .setColor(cfg.enabled ? 0x00cc66 : 0x999999)
+    .setTitle('📊 Activity Tracker Setup')
+    .addFields(
+      { name: 'Status', value: cfg.enabled ? '🟢 ON' : '⚪ OFF', inline: true },
+      { name: 'Threshold', value: `${cfg.thresholdDays} days`, inline: true },
+      { name: 'Quarantine channel', value: cfg.quarantineChannelId ? `<#${cfg.quarantineChannelId}>` : 'Not set', inline: true },
+      { name: 'Active role', value: cfg.activeRoleId ? `<@&${cfg.activeRoleId}>` : 'Not set', inline: true },
+      { name: 'Inactive role', value: cfg.inactiveRoleId ? `<@&${cfg.inactiveRoleId}>` : 'Not set', inline: true },
+      { name: 'Exempt roles', value: cfg.exemptRoleIds.length ? cfg.exemptRoleIds.map((id) => `<@&${id}>`).join(', ') : 'None' }
+    );
+
+  const activeRoleSelect = new RoleSelectMenuBuilder().setCustomId('setup:activity:activerole:select').setPlaceholder('Active role').setMinValues(1).setMaxValues(1);
+  if (cfg.activeRoleId) activeRoleSelect.setDefaultRoles(cfg.activeRoleId);
+
+  const inactiveRoleSelect = new RoleSelectMenuBuilder().setCustomId('setup:activity:inactiverole:select').setPlaceholder('Inactive role').setMinValues(1).setMaxValues(1);
+  if (cfg.inactiveRoleId) inactiveRoleSelect.setDefaultRoles(cfg.inactiveRoleId);
+
+  const quarantineSelect = new ChannelSelectMenuBuilder()
+    .setCustomId('setup:activity:quarantine:select')
+    .setPlaceholder('Quarantine / reactivation channel')
+    .setChannelTypes(ChannelType.GuildText)
+    .setMinValues(1)
+    .setMaxValues(1);
+  if (cfg.quarantineChannelId) quarantineSelect.setDefaultChannels(cfg.quarantineChannelId);
+
+  const exemptSelect = new RoleSelectMenuBuilder().setCustomId('setup:activity:exempt:select').setPlaceholder('Exempt roles').setMinValues(0).setMaxValues(25);
+  if (cfg.exemptRoleIds.length) exemptSelect.setDefaultRoles(...cfg.exemptRoleIds.slice(0, 25));
+
+  const buttonRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('setup:activity:toggle')
+      .setLabel(cfg.enabled ? 'Turn OFF' : 'Turn ON')
+      .setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup:activity:threshold').setLabel('Threshold').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:activity:postbutton').setLabel('Post Reactivation Button').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary)
+  );
+
+  return {
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(activeRoleSelect),
+      new ActionRowBuilder().addComponents(inactiveRoleSelect),
+      new ActionRowBuilder().addComponents(quarantineSelect),
+      new ActionRowBuilder().addComponents(exemptSelect),
+      buttonRow,
+    ],
+  };
+}
+
+client.on('interactionCreate', async (interaction) => {
+  try {
+    if (interaction.isChatInputCommand() && interaction.commandName === 'setup') {
+      return interaction.reply({ ...buildMainMenuMessage(), ephemeral: true });
+    }
+
+    if (!interaction.customId || !interaction.customId.startsWith('setup:')) return;
+    if (!interaction.isButton() && !interaction.isRoleSelectMenu() && !interaction.isChannelSelectMenu() && !interaction.isModalSubmit()) return;
+
+    const guildId = interaction.guildId;
+    const id = interaction.customId;
+
+    // ---- Navigation ----
+    if (id === 'setup:main') return interaction.update(buildMainMenuMessage());
+    if (id === 'setup:camera:menu') return interaction.update(buildCameraMenuMessage(guildId));
+    if (id === 'setup:activity:menu') return interaction.update(buildActivityMenuMessage(guildId));
+
+    // ---- Camera policy ----
+    if (id === 'setup:camera:toggle') {
+      const cfg = ensureGuildConfig(guildId);
+      cfg.enabled = !cfg.enabled;
+      const saved = saveCameraConfig(cameraConfig);
+      if (!cfg.enabled) clearAllCameraWarningsForGuild(guildId);
+      await interaction.update(buildCameraMenuMessage(guildId));
+      if (!saved) {
+        await interaction.followUp({
+          content: "⚠️ This didn't save to disk — it'll revert if the bot restarts. Check Railway logs for a DATA_DIR write error.",
+          ephemeral: true,
+        });
+      }
+      return;
+    }
+
+    if (id === 'setup:camera:channels:select') {
+      const cfg = ensureGuildConfig(guildId);
+      cfg.monitoredChannels = interaction.values;
+      saveCameraConfig(cameraConfig);
+      return interaction.update(buildCameraMenuMessage(guildId));
+    }
+
+    if (id === 'setup:camera:exempt:select') {
+      const cfg = ensureGuildConfig(guildId);
+      cfg.exemptRoles = interaction.values;
+      saveCameraConfig(cameraConfig);
+      return interaction.update(buildCameraMenuMessage(guildId));
+    }
+
+    if (id === 'setup:camera:timing') {
+      const cfg = ensureGuildConfig(guildId);
+      const modal = new ModalBuilder().setCustomId('setup:camera:timing:modal').setTitle('Camera Policy Timing');
+      const graceInput = new TextInputBuilder()
+        .setCustomId('grace')
+        .setLabel('Grace period (minutes, silent)')
+        .setStyle(TextInputStyle.Short)
+        .setValue(String(cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES))
+        .setRequired(true);
+      const warningInput = new TextInputBuilder()
+        .setCustomId('warning')
+        .setLabel('Warning period (minutes, after reminder)')
+        .setStyle(TextInputStyle.Short)
+        .setValue(String(cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES))
+        .setRequired(true);
+      modal.addComponents(new ActionRowBuilder().addComponents(graceInput), new ActionRowBuilder().addComponents(warningInput));
+      return interaction.showModal(modal);
+    }
+
+    if (id === 'setup:camera:timing:modal') {
+      const grace = parseInt(interaction.fields.getTextInputValue('grace'), 10);
+      const warning = parseInt(interaction.fields.getTextInputValue('warning'), 10);
+      if (!Number.isInteger(grace) || !Number.isInteger(warning) || grace < 0 || warning < 1) {
+        return interaction.reply({ content: '❌ Grace must be 0+ and warning must be 1+ (whole numbers, in minutes).', ephemeral: true });
+      }
+      const cfg = ensureGuildConfig(guildId);
+      cfg.graceMinutes = grace;
+      cfg.warningMinutes = warning;
+      saveCameraConfig(cameraConfig);
+      return interaction.update(buildCameraMenuMessage(guildId));
+    }
+
+    if (id === 'setup:camera:announcement') {
+      const cfg = ensureGuildConfig(guildId);
+      const modal = new ModalBuilder().setCustomId('setup:camera:announcement:modal').setTitle('Camera Policy Announcement Link');
+      const urlInput = new TextInputBuilder()
+        .setCustomId('url')
+        .setLabel('Announcement link (leave blank to clear)')
+        .setStyle(TextInputStyle.Short)
+        .setValue(cfg.announcementUrl || '')
+        .setRequired(false);
+      modal.addComponents(new ActionRowBuilder().addComponents(urlInput));
+      return interaction.showModal(modal);
+    }
+
+    if (id === 'setup:camera:announcement:modal') {
+      const url = interaction.fields.getTextInputValue('url').trim();
+      const cfg = ensureGuildConfig(guildId);
+      cfg.announcementUrl = url || null;
+      saveCameraConfig(cameraConfig);
+      return interaction.update(buildCameraMenuMessage(guildId));
+    }
+
+    // ---- Activity tracker ----
+    if (id === 'setup:activity:toggle') {
+      const cfg = ensureActivityGuildConfig(guildId);
+      if (!cfg.enabled && (!cfg.activeRoleId || !cfg.inactiveRoleId)) {
+        return interaction.reply({ content: '❌ Pick both an Active role and an Inactive role below before turning this on.', ephemeral: true });
+      }
+      cfg.enabled = !cfg.enabled;
+      const saved = saveActivityConfig(activityConfig);
+      if (cfg.enabled) syncActivityRoles(interaction.guild);
+      await interaction.update(buildActivityMenuMessage(guildId));
+      if (!saved) {
+        await interaction.followUp({
+          content: "⚠️ This didn't save to disk — it'll revert if the bot restarts. Check Railway logs for a DATA_DIR write error.",
+          ephemeral: true,
+        });
+      }
+      return;
+    }
+
+    if (id === 'setup:activity:activerole:select') {
+      const cfg = ensureActivityGuildConfig(guildId);
+      cfg.activeRoleId = interaction.values[0];
+      saveActivityConfig(activityConfig);
+      return interaction.update(buildActivityMenuMessage(guildId));
+    }
+
+    if (id === 'setup:activity:inactiverole:select') {
+      const cfg = ensureActivityGuildConfig(guildId);
+      cfg.inactiveRoleId = interaction.values[0];
+      saveActivityConfig(activityConfig);
+      return interaction.update(buildActivityMenuMessage(guildId));
+    }
+
+    if (id === 'setup:activity:quarantine:select') {
+      const cfg = ensureActivityGuildConfig(guildId);
+      cfg.quarantineChannelId = interaction.values[0];
+      saveActivityConfig(activityConfig);
+      return interaction.update(buildActivityMenuMessage(guildId));
+    }
+
+    if (id === 'setup:activity:exempt:select') {
+      const cfg = ensureActivityGuildConfig(guildId);
+      cfg.exemptRoleIds = interaction.values;
+      saveActivityConfig(activityConfig);
+      return interaction.update(buildActivityMenuMessage(guildId));
+    }
+
+    if (id === 'setup:activity:threshold') {
+      const cfg = ensureActivityGuildConfig(guildId);
+      const modal = new ModalBuilder().setCustomId('setup:activity:threshold:modal').setTitle('Inactivity Threshold');
+      const daysInput = new TextInputBuilder()
+        .setCustomId('days')
+        .setLabel('Days of inactivity before "Inactive"')
+        .setStyle(TextInputStyle.Short)
+        .setValue(String(cfg.thresholdDays))
+        .setRequired(true);
+      modal.addComponents(new ActionRowBuilder().addComponents(daysInput));
+      return interaction.showModal(modal);
+    }
+
+    if (id === 'setup:activity:threshold:modal') {
+      const days = parseInt(interaction.fields.getTextInputValue('days'), 10);
+      if (!Number.isInteger(days) || days < 1) {
+        return interaction.reply({ content: '❌ Threshold must be a whole number of days, 1 or more.', ephemeral: true });
+      }
+      const cfg = ensureActivityGuildConfig(guildId);
+      cfg.thresholdDays = days;
+      saveActivityConfig(activityConfig);
+      return interaction.update(buildActivityMenuMessage(guildId));
+    }
+
+    if (id === 'setup:activity:postbutton') {
+      const cfg = ensureActivityGuildConfig(guildId);
+      if (!cfg.quarantineChannelId) {
+        return interaction.reply({ content: '❌ Pick a quarantine channel below first.', ephemeral: true });
+      }
+      const channel = await interaction.guild.channels.fetch(cfg.quarantineChannelId);
+      const { embed: btnEmbed, row: btnRow } = buildReactivationEmbedAndRow();
+      await channel.send({ embeds: [btnEmbed], components: [btnRow] });
+      return interaction.reply({ content: `✅ Reactivation button posted in **#${channel.name}**.`, ephemeral: true });
+    }
+  } catch (err) {
+    console.error('Error handling /setup interaction:', err);
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: 'Something went wrong — check the terminal for details.', ephemeral: true });
+      } else {
+        await interaction.reply({ content: 'Something went wrong — check the terminal for details.', ephemeral: true });
+      }
+    } catch (followUpErr) {
+      console.error('Could not send setup error response:', followUpErr.message);
+    }
+  }
+});
+
+// ============================================================
 // /channel-index config (unrelated to the camera policy above)
 // ============================================================
 
@@ -475,6 +821,10 @@ const commands = [
         .setRequired(true)
         .addChoices({ name: 'On', value: 'on' }, { name: 'Off', value: 'off' })
     ),
+  new SlashCommandBuilder()
+    .setName('camera-status')
+    .setDescription('View the full current camera policy configuration for this server')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder()
     .setName('camera-monitor')
     .setDescription('Manage which voice channels enforce the cameras-on policy in this server')
@@ -758,7 +1108,7 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.commandName === 'camera-policy') {
       const desiredState = interaction.options.getString('state'); // 'on' or 'off'
       const enabled = desiredState === 'on';
-      setCameraPolicyEnabled(interaction.guildId, enabled);
+      const saved = setCameraPolicyEnabled(interaction.guildId, enabled);
 
       if (!enabled) {
         // Clear any warnings currently in flight FOR THIS SERVER ONLY, so
@@ -773,12 +1123,39 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
 
+      const saveWarning = saved
+        ? ''
+        : "\n⚠️ **This didn't save to disk** — it'll work for now, but will revert if the bot restarts. Check Railway logs for a DATA_DIR write error.";
+
       await interaction.reply({
-        content: enabled
-          ? '📷 Cameras-on policy is now **ON** — camera required in monitored voice channels.'
-          : '📴 Cameras-on policy is now **OFF** — no camera enforcement until turned back on.',
+        content:
+          (enabled
+            ? '📷 Cameras-on policy is now **ON** — camera required in monitored voice channels.'
+            : '📴 Cameras-on policy is now **OFF** — no camera enforcement until turned back on.') + saveWarning,
         ephemeral: false,
       });
+    }
+
+    if (interaction.commandName === 'camera-status') {
+      const cfg = ensureGuildConfig(interaction.guildId);
+      const embed = new EmbedBuilder()
+        .setColor(cfg.enabled ? 0x00cc66 : 0x999999)
+        .setTitle('📷 Camera Policy Status')
+        .addFields(
+          { name: 'Enabled', value: cfg.enabled ? 'Yes' : 'No', inline: true },
+          { name: 'Grace period', value: `${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES} minute(s)`, inline: true },
+          { name: 'Warning period', value: `${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES} minute(s)`, inline: true },
+          {
+            name: `Monitored channels (${cfg.monitoredChannels.length})`,
+            value: cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'None',
+          },
+          {
+            name: `Exempt roles (${cfg.exemptRoles.length})`,
+            value: cfg.exemptRoles.length ? cfg.exemptRoles.map((id) => `<@&${id}>`).join(', ') : 'None',
+          },
+          { name: 'Announcement link', value: cfg.announcementUrl ? cfg.announcementUrl : 'Not set' }
+        );
+      await interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
     if (interaction.commandName === 'camera-monitor') {
@@ -1134,6 +1511,15 @@ async function handleCameraOff(member, channel) {
 
   const graceTimeoutId = setTimeout(async () => {
     try {
+      // Re-check here, not just at the moment the toggle command ran — this
+      // timer was scheduled possibly minutes ago, and the policy may have
+      // been turned off since then. Without this check, a timer that's
+      // already in-flight can fire and disconnect someone even after "off".
+      if (!isCameraPolicyEnabled(guildId)) {
+        warnedUsers.delete(key);
+        return;
+      }
+
       const currentVoiceChannel = member.voice?.channel;
       const stillInMonitoredChannel = currentVoiceChannel && getMonitoredChannels(guildId).includes(currentVoiceChannel.id);
 
@@ -1148,6 +1534,13 @@ async function handleCameraOff(member, channel) {
 
       const warnTimeoutId = setTimeout(async () => {
         try {
+          // Same re-check — this timer can fire minutes after it was set,
+          // long after an admin may have turned the policy off.
+          if (!isCameraPolicyEnabled(guildId)) {
+            warnedUsers.delete(key);
+            return;
+          }
+
           const cvc = member.voice?.channel;
           const stillIn = cvc && getMonitoredChannels(guildId).includes(cvc.id);
 
