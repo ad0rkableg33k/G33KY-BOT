@@ -40,6 +40,9 @@ const {
   PermissionFlagsBits,
   EmbedBuilder,
   ChannelType,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require('discord.js');
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -55,7 +58,12 @@ if (!TOKEN || !GUILD_ID) {
 // -> Server Members Intent) or the bot will fail to log in with this intent
 // enabled here.
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMembers],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages, // needed so the activity tracker can see messageCreate events
+  ],
 });
 
 // ============================================================
@@ -173,6 +181,226 @@ function seedCameraConfigIfNeeded() {
   saveCameraConfig(cameraConfig);
   console.log('Seeded camera-config.json with the original xXOnlineStatusXx settings.');
 }
+
+// ============================================================
+// Activity tracker — PER-SERVER self-service config
+// ============================================================
+// Tracks whether a member has sent a message and/or spent >=1 minute in a
+// voice channel within a rolling window (default 30 days). Assigns an
+// "Active" role or "Inactive" role. Inactive members get a self-service
+// reactivation button (posted via /activity-tracker post-button) — clicking
+// it counts as new activity and swaps their role instantly. The actual
+// "quarantine" restriction (limiting inactive members to one channel) is
+// done with normal Discord permission overwrites on the Inactive role, set
+// up once by the server — this bot never touches channel permissions.
+
+const ACTIVITY_CONFIG_FILE = dataPath('activity-config.json');
+const ACTIVITY_DATA_FILE = dataPath('activity-data.json');
+const DEFAULT_THRESHOLD_DAYS = 30;
+const ACTIVITY_VOICE_MINUTES_REQUIRED = 1;
+
+function loadActivityConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(ACTIVITY_CONFIG_FILE, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveActivityConfig(config) {
+  fs.writeFileSync(ACTIVITY_CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+let activityConfig = loadActivityConfig();
+
+function ensureActivityGuildConfig(guildId) {
+  if (!activityConfig[guildId]) {
+    activityConfig[guildId] = {
+      enabled: false,
+      activeRoleId: null,
+      inactiveRoleId: null,
+      thresholdDays: DEFAULT_THRESHOLD_DAYS,
+      quarantineChannelId: null,
+      exemptRoleIds: [],
+    };
+  }
+  return activityConfig[guildId];
+}
+
+function loadActivityData() {
+  try {
+    return JSON.parse(fs.readFileSync(ACTIVITY_DATA_FILE, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveActivityData(data) {
+  fs.writeFileSync(ACTIVITY_DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+let activityData = loadActivityData();
+
+function getMemberActivity(guildId, userId) {
+  if (!activityData[guildId]) activityData[guildId] = {};
+  if (!activityData[guildId][userId]) {
+    activityData[guildId][userId] = { lastMessageAt: 0, lastVoiceActiveAt: 0 };
+  }
+  return activityData[guildId][userId];
+}
+
+// ---- Voice tracking ----
+// A member counts as "voice active" once they've spent >=1 continuous
+// minute in ANY voice channel in the server (not just monitored camera
+// channels — this is a separate, independent feature). Tracked via an
+// in-memory join-time map, finalized on leave/switch, and swept
+// periodically so long-running sessions count without requiring the
+// member to ever leave.
+const activityVoiceSessions = new Map(); // "guildId:userId" -> join timestamp (ms)
+const ACTIVITY_VOICE_MS_REQUIRED = ACTIVITY_VOICE_MINUTES_REQUIRED * 60 * 1000;
+
+function markVoiceActive(guildId, userId) {
+  const activity = getMemberActivity(guildId, userId);
+  activity.lastVoiceActiveAt = Date.now();
+  saveActivityData(activityData);
+}
+
+function finalizeActivityVoiceSession(guildId, userId, key) {
+  const joinedAt = activityVoiceSessions.get(key);
+  activityVoiceSessions.delete(key);
+  if (!joinedAt) return;
+  if (Date.now() - joinedAt >= ACTIVITY_VOICE_MS_REQUIRED) {
+    markVoiceActive(guildId, userId);
+  }
+}
+
+client.on('voiceStateUpdate', (oldState, newState) => {
+  const guildId = newState.guild.id;
+  const userId = newState.id;
+  const key = `${guildId}:${userId}`;
+  const wasInChannel = !!oldState.channelId;
+  const nowInChannel = !!newState.channelId;
+
+  if (!wasInChannel && nowInChannel) {
+    activityVoiceSessions.set(key, Date.now());
+  } else if (wasInChannel && !nowInChannel) {
+    finalizeActivityVoiceSession(guildId, userId, key);
+  } else if (wasInChannel && nowInChannel && oldState.channelId !== newState.channelId) {
+    finalizeActivityVoiceSession(guildId, userId, key);
+    activityVoiceSessions.set(key, Date.now());
+  }
+});
+
+// Sweep every 5 min so members who stay connected a long time still get
+// credited without needing to leave the channel.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, joinedAt] of activityVoiceSessions.entries()) {
+    if (now - joinedAt >= ACTIVITY_VOICE_MS_REQUIRED) {
+      const [guildId, userId] = key.split(':');
+      markVoiceActive(guildId, userId);
+    }
+  }
+}, 5 * 60 * 1000);
+
+// ---- Message tracking ----
+client.on('messageCreate', (message) => {
+  if (!message.guild || message.author.bot) return;
+  const activity = getMemberActivity(message.guild.id, message.author.id);
+  activity.lastMessageAt = Date.now();
+  saveActivityData(activityData);
+});
+
+// ---- Role sync (scheduled) ----
+// Runs once ~30s after startup, then every 6 hours. Also callable on-demand
+// via /activity-tracker check (for one member) — full-server sync only runs
+// on the schedule so we're not hammering the API on every command.
+async function syncActivityRoles(guild) {
+  const config = ensureActivityGuildConfig(guild.id);
+  if (!config.enabled || !config.activeRoleId || !config.inactiveRoleId) return;
+
+  const thresholdMs = config.thresholdDays * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  const members = await guild.members.fetch();
+  for (const member of members.values()) {
+    if (member.user.bot) continue;
+    if (config.exemptRoleIds.some((r) => member.roles.cache.has(r))) continue;
+
+    const activity = activityData[guild.id]?.[member.id];
+    const lastMessageAt = activity?.lastMessageAt || 0;
+    const lastVoiceActiveAt = activity?.lastVoiceActiveAt || 0;
+    // Brand-new members get a grace period — join date counts as their
+    // baseline "last active" so nobody gets quarantined the day they join.
+    const joinedAt = member.joinedTimestamp || 0;
+    const lastActive = Math.max(lastMessageAt, lastVoiceActiveAt, joinedAt);
+
+    const isActive = now - lastActive <= thresholdMs;
+
+    try {
+      if (isActive) {
+        if (!member.roles.cache.has(config.activeRoleId)) await member.roles.add(config.activeRoleId);
+        if (member.roles.cache.has(config.inactiveRoleId)) await member.roles.remove(config.inactiveRoleId);
+      } else {
+        if (!member.roles.cache.has(config.inactiveRoleId)) await member.roles.add(config.inactiveRoleId);
+        if (member.roles.cache.has(config.activeRoleId)) await member.roles.remove(config.activeRoleId);
+      }
+    } catch (err) {
+      console.error(`Activity role sync failed for ${member.id} in ${guild.id}:`, err.message);
+    }
+  }
+}
+
+async function syncAllActivityGuilds() {
+  for (const guild of client.guilds.cache.values()) {
+    await syncActivityRoles(guild);
+  }
+}
+
+// ---- Reactivation button ----
+function buildReactivationEmbedAndRow() {
+  const embed = new EmbedBuilder()
+    .setColor(0xffaa00)
+    .setTitle("You've been marked inactive")
+    .setDescription(
+      "You haven't sent a message or spent time in voice recently, so you're currently limited to this channel.\n\n" +
+        "Click the button below to let us know you're still around — this instantly restores your full access."
+    );
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('activity_reactivate').setLabel("I'm here — Reactivate me").setStyle(ButtonStyle.Success)
+  );
+
+  return { embed, row };
+}
+
+async function handleReactivateButton(interaction) {
+  const config = ensureActivityGuildConfig(interaction.guild.id);
+  const activity = getMemberActivity(interaction.guild.id, interaction.user.id);
+  activity.lastMessageAt = Date.now();
+  saveActivityData(activityData);
+
+  const member = interaction.member;
+  try {
+    if (config.inactiveRoleId && member.roles.cache.has(config.inactiveRoleId)) {
+      await member.roles.remove(config.inactiveRoleId);
+    }
+    if (config.activeRoleId && !member.roles.cache.has(config.activeRoleId)) {
+      await member.roles.add(config.activeRoleId);
+    }
+    await interaction.reply({ content: "Welcome back! You've been reactivated — full access restored.", ephemeral: true });
+  } catch (err) {
+    console.error('Reactivation failed:', err);
+    await interaction.reply({ content: 'Something went wrong reactivating you — ping a mod for help.', ephemeral: true });
+  }
+}
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+  if (interaction.customId === 'activity_reactivate') {
+    await handleReactivateButton(interaction);
+  }
+});
 
 // ============================================================
 // /channel-index config (unrelated to the camera policy above)
@@ -319,6 +547,54 @@ const commands = [
     )
     .addSubcommand((sub) => sub.setName('clear').setDescription('Remove the announcement link'))
     .addSubcommand((sub) => sub.setName('view').setDescription('View the current announcement link')),
+  new SlashCommandBuilder()
+    .setName('activity-tracker')
+    .setDescription('Configure automatic active/inactive member tracking')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((sub) => sub.setName('enable').setDescription('Turn on activity tracking for this server'))
+    .addSubcommand((sub) => sub.setName('disable').setDescription('Turn off activity tracking for this server'))
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-roles')
+        .setDescription('Set the Active and Inactive roles')
+        .addRoleOption((opt) => opt.setName('active').setDescription('Role for active members').setRequired(true))
+        .addRoleOption((opt) => opt.setName('inactive').setDescription('Role for inactive members').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-threshold')
+        .setDescription('Days of inactivity before someone is marked inactive (default 30)')
+        .addIntegerOption((opt) => opt.setName('days').setDescription('Number of days').setRequired(true).setMinValue(1))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-quarantine-channel')
+        .setDescription('The channel inactive members can still see, to reactivate themselves')
+        .addChannelOption((opt) => opt.setName('channel').setDescription('Channel').setRequired(true))
+    )
+    .addSubcommandGroup((group) =>
+      group
+        .setName('exempt-role')
+        .setDescription('Roles skipped by activity tracking entirely (e.g. staff/bots)')
+        .addSubcommand((sub) =>
+          sub.setName('add').setDescription('Exempt a role').addRoleOption((opt) => opt.setName('role').setDescription('Role').setRequired(true))
+        )
+        .addSubcommand((sub) =>
+          sub
+            .setName('remove')
+            .setDescription('Remove an exemption')
+            .addRoleOption((opt) => opt.setName('role').setDescription('Role').setRequired(true))
+        )
+        .addSubcommand((sub) => sub.setName('list').setDescription('List exempt roles'))
+    )
+    .addSubcommand((sub) => sub.setName('post-button').setDescription('Post the reactivation button in the quarantine channel'))
+    .addSubcommand((sub) => sub.setName('status').setDescription('View current activity tracker configuration'))
+    .addSubcommand((sub) =>
+      sub
+        .setName('check')
+        .setDescription("Manually check one member's activity status")
+        .addUserOption((opt) => opt.setName('user').setDescription('Member to check').setRequired(true))
+    ),
 ].map((cmd) => cmd.toJSON());
 
 // ---- Register slash commands with Discord (GLOBAL = works in every server
@@ -401,6 +677,11 @@ client.once('ready', async () => {
   const guild = await client.guilds.fetch(GUILD_ID);
   exportToFile(guild);
   ensureDescriptionsFile(guild);
+
+  // Activity tracker: first sync shortly after startup (let the member
+  // cache warm up), then every 6 hours after that.
+  setTimeout(syncAllActivityGuilds, 30 * 1000);
+  setInterval(syncAllActivityGuilds, 6 * 60 * 60 * 1000);
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -604,6 +885,114 @@ client.on('interactionCreate', async (interaction) => {
       } else if (sub === 'view') {
         await interaction.reply({
           content: guildConfig.announcementUrl ? `Current announcement link:\n${guildConfig.announcementUrl}` : 'No announcement link is set for this server.',
+          ephemeral: true,
+        });
+      }
+    }
+
+    if (interaction.commandName === 'activity-tracker') {
+      const group = interaction.options.getSubcommandGroup(false);
+      const sub = interaction.options.getSubcommand();
+      const guildConfig = ensureActivityGuildConfig(interaction.guildId);
+
+      if (group === 'exempt-role') {
+        if (sub === 'add') {
+          const role = interaction.options.getRole('role');
+          if (guildConfig.exemptRoleIds.includes(role.id)) {
+            await interaction.reply({ content: `**${role.name}** is already exempt.`, ephemeral: true });
+          } else {
+            guildConfig.exemptRoleIds.push(role.id);
+            saveActivityConfig(activityConfig);
+            await interaction.reply(`✅ **${role.name}** is now exempt from activity tracking.`);
+          }
+        } else if (sub === 'remove') {
+          const role = interaction.options.getRole('role');
+          guildConfig.exemptRoleIds = guildConfig.exemptRoleIds.filter((id) => id !== role.id);
+          saveActivityConfig(activityConfig);
+          await interaction.reply(`✅ **${role.name}** is no longer exempt.`);
+        } else if (sub === 'list') {
+          const list = guildConfig.exemptRoleIds.length ? guildConfig.exemptRoleIds.map((id) => `<@&${id}>`).join('\n') : 'None set.';
+          await interaction.reply({ content: `**Exempt roles:**\n${list}`, ephemeral: true });
+        }
+        return;
+      }
+
+      if (sub === 'enable') {
+        if (!guildConfig.activeRoleId || !guildConfig.inactiveRoleId) {
+          await interaction.reply({ content: '❌ Set your roles first with `/activity-tracker set-roles`.', ephemeral: true });
+        } else {
+          guildConfig.enabled = true;
+          saveActivityConfig(activityConfig);
+          await interaction.reply('✅ Activity tracking is now **ON**.');
+          syncActivityRoles(interaction.guild); // run an immediate sync
+        }
+      } else if (sub === 'disable') {
+        guildConfig.enabled = false;
+        saveActivityConfig(activityConfig);
+        await interaction.reply('📴 Activity tracking is now **OFF**.');
+      } else if (sub === 'set-roles') {
+        const active = interaction.options.getRole('active');
+        const inactive = interaction.options.getRole('inactive');
+        guildConfig.activeRoleId = active.id;
+        guildConfig.inactiveRoleId = inactive.id;
+        saveActivityConfig(activityConfig);
+        await interaction.reply(`✅ Active role set to **${active.name}**, inactive role set to **${inactive.name}**.`);
+      } else if (sub === 'set-threshold') {
+        const days = interaction.options.getInteger('days');
+        guildConfig.thresholdDays = days;
+        saveActivityConfig(activityConfig);
+        await interaction.reply(`✅ Inactivity threshold set to **${days} day(s)**.`);
+      } else if (sub === 'set-quarantine-channel') {
+        const channel = interaction.options.getChannel('channel');
+        guildConfig.quarantineChannelId = channel.id;
+        saveActivityConfig(activityConfig);
+        await interaction.reply(
+          `✅ Quarantine/reactivation channel set to **#${channel.name}**. Don't forget to set that channel's permissions (see setup guide) and run \`/activity-tracker post-button\`.`
+        );
+      } else if (sub === 'post-button') {
+        if (!guildConfig.quarantineChannelId) {
+          await interaction.reply({ content: '❌ Set a quarantine channel first with `/activity-tracker set-quarantine-channel`.', ephemeral: true });
+        } else {
+          const channel = await interaction.guild.channels.fetch(guildConfig.quarantineChannelId);
+          const { embed, row } = buildReactivationEmbedAndRow();
+          await channel.send({ embeds: [embed], components: [row] });
+          await interaction.reply({ content: `✅ Button posted in **#${channel.name}**.`, ephemeral: true });
+        }
+      } else if (sub === 'status') {
+        const embed = new EmbedBuilder()
+          .setColor(guildConfig.enabled ? 0x00cc66 : 0x999999)
+          .setTitle('Activity Tracker Status')
+          .addFields(
+            { name: 'Enabled', value: guildConfig.enabled ? 'Yes' : 'No', inline: true },
+            { name: 'Threshold', value: `${guildConfig.thresholdDays} days`, inline: true },
+            { name: 'Active role', value: guildConfig.activeRoleId ? `<@&${guildConfig.activeRoleId}>` : 'Not set', inline: true },
+            { name: 'Inactive role', value: guildConfig.inactiveRoleId ? `<@&${guildConfig.inactiveRoleId}>` : 'Not set', inline: true },
+            {
+              name: 'Quarantine channel',
+              value: guildConfig.quarantineChannelId ? `<#${guildConfig.quarantineChannelId}>` : 'Not set',
+              inline: true,
+            },
+            {
+              name: 'Exempt roles',
+              value: guildConfig.exemptRoleIds.length ? guildConfig.exemptRoleIds.map((id) => `<@&${id}>`).join(', ') : 'None',
+            }
+          );
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+      } else if (sub === 'check') {
+        const user = interaction.options.getUser('user');
+        const member = await interaction.guild.members.fetch(user.id);
+        const activity = activityData[interaction.guildId]?.[user.id];
+        const lastMessageAt = activity?.lastMessageAt || 0;
+        const lastVoiceActiveAt = activity?.lastVoiceActiveAt || 0;
+        const lastActive = Math.max(lastMessageAt, lastVoiceActiveAt, member.joinedTimestamp || 0);
+        const daysSince = Math.floor((Date.now() - lastActive) / (24 * 60 * 60 * 1000));
+        await interaction.reply({
+          content:
+            `**${user.tag}**\n` +
+            `Last message: ${lastMessageAt ? `<t:${Math.floor(lastMessageAt / 1000)}:R>` : 'never recorded'}\n` +
+            `Last voice activity: ${lastVoiceActiveAt ? `<t:${Math.floor(lastVoiceActiveAt / 1000)}:R>` : 'never recorded'}\n` +
+            `Effectively last active: ${daysSince} day(s) ago\n` +
+            `Currently: ${daysSince <= guildConfig.thresholdDays ? '🟢 Active' : '🔴 Inactive'}`,
           ephemeral: true,
         });
       }
