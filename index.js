@@ -45,6 +45,7 @@ const {
   ButtonStyle,
   RoleSelectMenuBuilder,
   ChannelSelectMenuBuilder,
+  StringSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -463,34 +464,51 @@ function clearAllCameraWarningsForGuild(guildId) {
 function buildMainMenuMessage() {
   const embed = new EmbedBuilder()
     .setColor(0x8a2be2)
-    .setTitle('⚙️ G33KY Bot Setup')
-    .setDescription('Pick what you want to configure. Everything here saves instantly — no need to type commands.');
+    .setTitle('⚙️ G33KY Bot Configuration')
+    .setDescription('Select a module to configure below. Everything saves instantly — no need to type commands.');
 
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('setup:camera:menu').setLabel('📷 Camera Policy').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('setup:activity:menu').setLabel('📊 Activity Tracker').setStyle(ButtonStyle.Primary)
-  );
+  const moduleSelect = new StringSelectMenuBuilder()
+    .setCustomId('setup:main:select')
+    .setPlaceholder('Select a module to configure...')
+    .addOptions(
+      { label: 'Camera Policy', description: 'Cameras-on voice channel policy', value: 'camera', emoji: '📷' },
+      { label: 'Activity Tracker', description: 'Track member activity & auto-role members', value: 'activity', emoji: '📊' }
+    );
 
-  return { embeds: [embed], components: [row] };
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(moduleSelect)] };
 }
 
 function buildCameraMenuMessage(guildId) {
   const cfg = ensureGuildConfig(guildId);
 
   const embed = new EmbedBuilder()
-    .setColor(cfg.enabled ? 0x00cc66 : 0x999999)
-    .setTitle('📷 Camera Policy Setup')
-    .addFields(
-      { name: 'Status', value: cfg.enabled ? '🟢 ON' : '⚪ OFF', inline: true },
-      { name: 'Timing', value: `${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES}m grace + ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES}m warning`, inline: true },
-      { name: 'Announcement', value: cfg.announcementUrl ? `[view post](${cfg.announcementUrl})` : 'Not posted yet', inline: true },
-      { name: 'Monitored channels', value: cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'None — pick some below' },
-      { name: 'Exempt roles', value: cfg.exemptRoles.length ? cfg.exemptRoles.map((id) => `<@&${id}>`).join(', ') : 'None' }
+    .setColor(0x2b2d31)
+    .setTitle('📷 Camera Policy Configuration')
+    .setDescription(
+      `**Status:** ${cfg.enabled ? '🟢 Enabled' : '🔴 Disabled'}\n` +
+        `**Timing:** ${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES}m grace + ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES}m warning\n` +
+        `**Announcement:** ${cfg.announcementUrl ? `[view post](${cfg.announcementUrl})` : 'Not posted yet'}\n` +
+        `**Monitored Channels:** ${cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'Not set'}\n` +
+        `**Exempt Roles:** ${cfg.exemptRoles.length ? cfg.exemptRoles.map((id) => `<@&${id}>`).join(', ') : 'Not set'}`
     );
+
+  const topRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('setup:camera:toggle')
+      .setLabel(cfg.enabled ? 'Disable' : 'Enable')
+      .setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup:camera:announce-post').setLabel('Post Policy Announcement').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup:camera:timing').setLabel('Set Timing').setStyle(ButtonStyle.Secondary)
+  );
+
+  const bottomRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup:camera:create-exempt-role').setLabel('Create Exempt Role').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back to Modules').setStyle(ButtonStyle.Secondary)
+  );
 
   const channelSelect = new ChannelSelectMenuBuilder()
     .setCustomId('setup:camera:channels:select')
-    .setPlaceholder('Monitored voice channels')
+    .setPlaceholder('Select monitored voice channels...')
     .setChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
     .setMinValues(0)
     .setMaxValues(25);
@@ -498,37 +516,27 @@ function buildCameraMenuMessage(guildId) {
 
   const roleSelect = new RoleSelectMenuBuilder()
     .setCustomId('setup:camera:exempt:select')
-    .setPlaceholder('Exempt roles')
+    .setPlaceholder('Select the exempt role(s)...')
     .setMinValues(0)
     .setMaxValues(25);
   if (cfg.exemptRoles.length) roleSelect.setDefaultRoles(...cfg.exemptRoles.slice(0, 25));
 
   const announceChannelSelect = new ChannelSelectMenuBuilder()
     .setCustomId('setup:camera:announce-channel:select')
-    .setPlaceholder('Announcement channel')
+    .setPlaceholder('Select the announcement channel...')
     .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
     .setMinValues(0)
     .setMaxValues(1);
   if (cfg.announcementChannelId) announceChannelSelect.setDefaultChannels(cfg.announcementChannelId);
 
-  const buttonRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('setup:camera:toggle')
-      .setLabel(cfg.enabled ? 'Turn OFF' : 'Turn ON')
-      .setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('setup:camera:timing').setLabel('Timing').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('setup:camera:create-exempt-role').setLabel('✨ Create Exempt Role').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('setup:camera:announce-post').setLabel('📢 Post Announcement').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary)
-  );
-
   return {
     embeds: [embed],
     components: [
+      topRow,
+      bottomRow,
       new ActionRowBuilder().addComponents(channelSelect),
       new ActionRowBuilder().addComponents(roleSelect),
       new ActionRowBuilder().addComponents(announceChannelSelect),
-      buttonRow,
     ],
   };
 }
@@ -540,74 +548,71 @@ function buildActivityMenuMessage(guildId) {
   const cfg = ensureActivityGuildConfig(guildId);
 
   const embed = new EmbedBuilder()
-    .setColor(cfg.enabled ? 0x00cc66 : 0x999999)
-    .setTitle('📊 Activity Tracker Setup')
-    .setDescription('Use the buttons below to set up roles, channels, and timing.')
-    .addFields(
-      { name: 'Status', value: cfg.enabled ? '🟢 ON' : '⚪ OFF', inline: true },
-      { name: 'Threshold', value: `${cfg.thresholdDays} days`, inline: true },
-      { name: 'Quarantine channel', value: cfg.quarantineChannelId ? `<#${cfg.quarantineChannelId}>` : 'Not set', inline: true },
-      { name: 'Active role', value: cfg.activeRoleId ? `<@&${cfg.activeRoleId}>` : 'Not set', inline: true },
-      { name: 'Inactive role', value: cfg.inactiveRoleId ? `<@&${cfg.inactiveRoleId}>` : 'Not set', inline: true },
-      { name: 'Exempt roles', value: cfg.exemptRoleIds.length ? cfg.exemptRoleIds.map((id) => `<@&${id}>`).join(', ') : 'None', inline: true },
-      {
-        name: 'Monitored channels',
-        value: cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'All channels (default)',
-      }
+    .setColor(0x2b2d31)
+    .setTitle('📊 Activity Tracker Configuration')
+    .setDescription(
+      `**Status:** ${cfg.enabled ? '🟢 Enabled' : '🔴 Disabled'}\n` +
+        `**Threshold:** ${cfg.thresholdDays} days\n` +
+        `**Quarantine Channel:** ${cfg.quarantineChannelId ? `<#${cfg.quarantineChannelId}>` : 'Not set'}\n` +
+        `**Active Role:** ${cfg.activeRoleId ? `<@&${cfg.activeRoleId}>` : 'Not set'}\n` +
+        `**Inactive Role:** ${cfg.inactiveRoleId ? `<@&${cfg.inactiveRoleId}>` : 'Not set'}\n` +
+        `**Exempt Roles:** ${cfg.exemptRoleIds.length ? cfg.exemptRoleIds.map((id) => `<@&${id}>`).join(', ') : 'Not set'}\n` +
+        `**Monitored Channels:** ${cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'All channels (default)'}`
     );
 
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('setup:activity:roles-menu').setLabel('🎭 Roles').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('setup:activity:channels-menu').setLabel('# Channels').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('setup:activity:threshold').setLabel('⏱ Threshold').setStyle(ButtonStyle.Secondary)
-  );
-  const row2 = new ActionRowBuilder().addComponents(
+  const topRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('setup:activity:toggle')
-      .setLabel(cfg.enabled ? 'Turn OFF' : 'Turn ON')
+      .setLabel(cfg.enabled ? 'Disable' : 'Enable')
       .setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('setup:activity:postbutton').setLabel('📨 Post Reactivation Button').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId('setup:activity:postbutton').setLabel('Post Reactivation Button').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup:activity:threshold').setLabel('Set Threshold').setStyle(ButtonStyle.Secondary)
   );
 
-  return { embeds: [embed], components: [row1, row2] };
+  const bottomRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup:activity:roles-menu').setLabel('🎭 Configure Roles').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:activity:channels-menu').setLabel('# Configure Channels').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back to Modules').setStyle(ButtonStyle.Secondary)
+  );
+
+  return { embeds: [embed], components: [topRow, bottomRow] };
 }
 
 function buildActivityRolesMenuMessage(guildId) {
   const cfg = ensureActivityGuildConfig(guildId);
 
   const embed = new EmbedBuilder()
-    .setColor(0x8a2be2)
+    .setColor(0x2b2d31)
     .setTitle('📊 Activity Tracker — Roles')
-    .addFields(
-      { name: 'Active role', value: cfg.activeRoleId ? `<@&${cfg.activeRoleId}>` : 'Not set', inline: true },
-      { name: 'Inactive role', value: cfg.inactiveRoleId ? `<@&${cfg.inactiveRoleId}>` : 'Not set', inline: true },
-      { name: 'Exempt roles', value: cfg.exemptRoleIds.length ? cfg.exemptRoleIds.map((id) => `<@&${id}>`).join(', ') : 'None' }
+    .setDescription(
+      `**Active Role:** ${cfg.activeRoleId ? `<@&${cfg.activeRoleId}>` : 'Not set'}\n` +
+        `**Inactive Role:** ${cfg.inactiveRoleId ? `<@&${cfg.inactiveRoleId}>` : 'Not set'}\n` +
+        `**Exempt Roles:** ${cfg.exemptRoleIds.length ? cfg.exemptRoleIds.map((id) => `<@&${id}>`).join(', ') : 'Not set'}`
     );
 
-  const activeRoleSelect = new RoleSelectMenuBuilder().setCustomId('setup:activity:activerole:select').setPlaceholder('Active role').setMinValues(1).setMaxValues(1);
-  if (cfg.activeRoleId) activeRoleSelect.setDefaultRoles(cfg.activeRoleId);
-
-  const inactiveRoleSelect = new RoleSelectMenuBuilder().setCustomId('setup:activity:inactiverole:select').setPlaceholder('Inactive role').setMinValues(1).setMaxValues(1);
-  if (cfg.inactiveRoleId) inactiveRoleSelect.setDefaultRoles(cfg.inactiveRoleId);
-
-  const exemptSelect = new RoleSelectMenuBuilder().setCustomId('setup:activity:exempt:select').setPlaceholder('Exempt roles').setMinValues(0).setMaxValues(25);
-  if (cfg.exemptRoleIds.length) exemptSelect.setDefaultRoles(...cfg.exemptRoleIds.slice(0, 25));
-
   const buttonRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('setup:activity:create-active-role').setLabel('✨ Create Active Role').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('setup:activity:create-inactive-role').setLabel('✨ Create Inactive Role').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('setup:activity:create-exempt-role').setLabel('✨ Create Exempt Role').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:activity:create-active-role').setLabel('Create Active Role').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:activity:create-inactive-role').setLabel('Create Inactive Role').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:activity:create-exempt-role').setLabel('Create Exempt Role').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('setup:activity:menu').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary)
   );
+
+  const activeRoleSelect = new RoleSelectMenuBuilder().setCustomId('setup:activity:activerole:select').setPlaceholder('Select the active role...').setMinValues(1).setMaxValues(1);
+  if (cfg.activeRoleId) activeRoleSelect.setDefaultRoles(cfg.activeRoleId);
+
+  const inactiveRoleSelect = new RoleSelectMenuBuilder().setCustomId('setup:activity:inactiverole:select').setPlaceholder('Select the inactive role...').setMinValues(1).setMaxValues(1);
+  if (cfg.inactiveRoleId) inactiveRoleSelect.setDefaultRoles(cfg.inactiveRoleId);
+
+  const exemptSelect = new RoleSelectMenuBuilder().setCustomId('setup:activity:exempt:select').setPlaceholder('Select the exempt role(s)...').setMinValues(0).setMaxValues(25);
+  if (cfg.exemptRoleIds.length) exemptSelect.setDefaultRoles(...cfg.exemptRoleIds.slice(0, 25));
 
   return {
     embeds: [embed],
     components: [
+      buttonRow,
       new ActionRowBuilder().addComponents(activeRoleSelect),
       new ActionRowBuilder().addComponents(inactiveRoleSelect),
       new ActionRowBuilder().addComponents(exemptSelect),
-      buttonRow,
     ],
   };
 }
@@ -616,21 +621,23 @@ function buildActivityChannelsMenuMessage(guildId) {
   const cfg = ensureActivityGuildConfig(guildId);
 
   const embed = new EmbedBuilder()
-    .setColor(0x8a2be2)
+    .setColor(0x2b2d31)
     .setTitle('📊 Activity Tracker — Channels')
-    .addFields(
-      { name: 'Quarantine / reactivation channel', value: cfg.quarantineChannelId ? `<#${cfg.quarantineChannelId}>` : 'Not set' },
-      {
-        name: 'Monitored channels',
-        value: cfg.monitoredChannels.length
-          ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ')
-          : 'All channels (default) — pick specific ones below to narrow what counts as activity',
-      }
+    .setDescription(
+      `**Quarantine / Reactivation Channel:** ${cfg.quarantineChannelId ? `<#${cfg.quarantineChannelId}>` : 'Not set'}\n` +
+        `**Monitored Channels:** ${
+          cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'All channels (default)'
+        }`
     );
+
+  const buttonRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup:activity:create-quarantine-channel').setLabel('Create Reactivation Channel').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:activity:menu').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary)
+  );
 
   const quarantineSelect = new ChannelSelectMenuBuilder()
     .setCustomId('setup:activity:quarantine:select')
-    .setPlaceholder('Quarantine / reactivation channel')
+    .setPlaceholder('Select the reactivation channel...')
     .setChannelTypes(ChannelType.GuildText)
     .setMinValues(1)
     .setMaxValues(1);
@@ -638,20 +645,15 @@ function buildActivityChannelsMenuMessage(guildId) {
 
   const monitoredSelect = new ChannelSelectMenuBuilder()
     .setCustomId('setup:activity:channels:select')
-    .setPlaceholder('Channels to track (leave empty = everywhere)')
+    .setPlaceholder('Select channels to track (empty = everywhere)...')
     .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildVoice, ChannelType.GuildStageVoice)
     .setMinValues(0)
     .setMaxValues(25);
   if (cfg.monitoredChannels.length) monitoredSelect.setDefaultChannels(...cfg.monitoredChannels.slice(0, 25));
 
-  const buttonRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('setup:activity:create-quarantine-channel').setLabel('✨ Create Reactivation Channel').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('setup:activity:menu').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary)
-  );
-
   return {
     embeds: [embed],
-    components: [new ActionRowBuilder().addComponents(quarantineSelect), new ActionRowBuilder().addComponents(monitoredSelect), buttonRow],
+    components: [buttonRow, new ActionRowBuilder().addComponents(quarantineSelect), new ActionRowBuilder().addComponents(monitoredSelect)],
   };
 }
 
@@ -662,13 +664,26 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (!interaction.customId || !interaction.customId.startsWith('setup:')) return;
-    if (!interaction.isButton() && !interaction.isRoleSelectMenu() && !interaction.isChannelSelectMenu() && !interaction.isModalSubmit()) return;
+    if (
+      !interaction.isButton() &&
+      !interaction.isRoleSelectMenu() &&
+      !interaction.isChannelSelectMenu() &&
+      !interaction.isStringSelectMenu() &&
+      !interaction.isModalSubmit()
+    )
+      return;
 
     const guildId = interaction.guildId;
     const id = interaction.customId;
 
     // ---- Navigation ----
     if (id === 'setup:main') return interaction.update(buildMainMenuMessage());
+    if (id === 'setup:main:select') {
+      const choice = interaction.values[0];
+      if (choice === 'camera') return interaction.update(buildCameraMenuMessage(guildId));
+      if (choice === 'activity') return interaction.update(buildActivityMenuMessage(guildId));
+      return;
+    }
     if (id === 'setup:camera:menu') return interaction.update(buildCameraMenuMessage(guildId));
     if (id === 'setup:activity:menu') return interaction.update(buildActivityMenuMessage(guildId));
     if (id === 'setup:activity:roles-menu') return interaction.update(buildActivityRolesMenuMessage(guildId));
