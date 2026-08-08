@@ -1042,6 +1042,10 @@ const CHANNEL_TYPE_NAMES = {
 // ---- Slash command definitions ----
 const commands = [
   new SlashCommandBuilder()
+    .setName('setup')
+    .setDescription('Open the G33KY Bot configuration menu (Camera Policy, Activity Tracker, etc.)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder()
     .setName('channel-index')
     .setDescription('Post a formatted index of all channels in this server')
     .addStringOption((opt) =>
