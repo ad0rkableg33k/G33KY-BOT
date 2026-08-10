@@ -337,9 +337,40 @@ client.on('voiceStateUpdate', (oldState, newState) => {
   }
 });
 
-// Sweep every 5 min so members who stay connected a long time still get
-// credited without needing to leave the channel.
-setInterval(() => {
+// ---- Reconciliation: credit anyone CURRENTLY connected to voice ----
+// The join/leave tracking above only sees people who join *while the bot
+// is running*. If someone is already mid-call at the exact moment the bot
+// restarts (which happens on every redeploy), the bot never sees a "join"
+// for them — so when they eventually leave, there's no session to close
+// and their voice time silently goes uncounted, no matter how long they
+// were actually connected. This directly scans who's really in voice right
+// now (via Discord's own live state, not our possibly-stale in-memory map)
+// and credits them outright, then refreshes their session so join/leave
+// tracking stays consistent going forward. Runs once at startup — so a
+// redeploy can never erase someone's in-progress call — and on the same
+// periodic schedule as the sweep below, so it's self-healing against any
+// future missed events too (e.g. a brief Gateway reconnect gap).
+async function reconcileConnectedVoiceMembers() {
+  for (const guild of client.guilds.cache.values()) {
+    await guild.members.fetch().catch(() => {}); // needed so channel.members resolves correctly
+    const cfg = ensureActivityGuildConfig(guild.id);
+    for (const channel of guild.channels.cache.values()) {
+      if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildStageVoice) continue;
+      if (cfg.monitoredChannels.length && !cfg.monitoredChannels.includes(channel.id)) continue;
+      for (const member of channel.members.values()) {
+        if (member.user.bot) continue;
+        markVoiceActive(guild.id, member.id);
+        activityVoiceSessions.set(`${guild.id}:${member.id}`, { joinedAt: Date.now(), channelId: channel.id });
+      }
+    }
+  }
+}
+
+// Sweep every 5 min: reconcile who's actually connected right now (fixes
+// the restart edge case above and self-heals missed events), and also
+// finalize any tracked session that's crossed the 1-minute mark.
+setInterval(async () => {
+  await reconcileConnectedVoiceMembers();
   const now = Date.now();
   for (const [key, session] of activityVoiceSessions.entries()) {
     if (now - session.joinedAt >= ACTIVITY_VOICE_MS_REQUIRED) {
@@ -1425,8 +1456,11 @@ client.once('ready', async () => {
   exportToFile(guild);
   ensureDescriptionsFile(guild);
 
-  // Activity tracker: first sync shortly after startup (let the member
-  // cache warm up), then every 6 hours after that.
+  // Activity tracker: reconcile who's currently connected to voice FIRST
+  // (fixes the bug where a redeploy mid-call erases someone's voice
+  // credit), then sync roles shortly after (let the member cache warm
+  // up), then every 6 hours after that.
+  setTimeout(reconcileConnectedVoiceMembers, 15 * 1000);
   setTimeout(syncAllActivityGuilds, 30 * 1000);
   setInterval(syncAllActivityGuilds, 6 * 60 * 60 * 1000);
 
