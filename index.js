@@ -217,6 +217,7 @@ function seedCameraConfigIfNeeded() {
 const ACTIVITY_CONFIG_FILE = dataPath('activity-config.json');
 const ACTIVITY_DATA_FILE = dataPath('activity-data.json');
 const DEFAULT_THRESHOLD_DAYS = 30;
+const DEFAULT_RETENTION_DAYS = 90; // how long a raw activity timestamp is kept before being purged entirely
 const ACTIVITY_VOICE_MINUTES_REQUIRED = 1;
 
 function loadActivityConfig() {
@@ -249,11 +250,15 @@ function ensureActivityGuildConfig(guildId) {
       quarantineChannelId: null,
       exemptRoleIds: [],
       monitoredChannels: [],
+      retentionDays: DEFAULT_RETENTION_DAYS,
     };
   }
-  // Normalize configs saved before monitoredChannels existed
+  // Normalize configs saved before these fields existed
   if (activityConfig[guildId].monitoredChannels === undefined) {
     activityConfig[guildId].monitoredChannels = [];
+  }
+  if (activityConfig[guildId].retentionDays === undefined) {
+    activityConfig[guildId].retentionDays = DEFAULT_RETENTION_DAYS;
   }
   return activityConfig[guildId];
 }
@@ -267,7 +272,13 @@ function loadActivityData() {
 }
 
 function saveActivityData(data) {
-  fs.writeFileSync(ACTIVITY_DATA_FILE, JSON.stringify(data, null, 2));
+  try {
+    fs.writeFileSync(ACTIVITY_DATA_FILE, JSON.stringify(data, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`Failed to save activity-data.json to ${ACTIVITY_DATA_FILE}:`, err.message);
+    return false;
+  }
 }
 
 let activityData = loadActivityData();
@@ -396,6 +407,56 @@ async function syncAllActivityGuilds() {
   for (const guild of client.guilds.cache.values()) {
     await syncActivityRoles(guild);
   }
+}
+
+// ---- Data retention: automatically purge raw activity timestamps once
+// they're older than each guild's configured retention window (default 90
+// days). This is separate from thresholdDays (which only decides the
+// Active/Inactive role) — retentionDays decides how long the underlying
+// lastMessageAt/lastVoiceActiveAt record is kept on disk at all, so the
+// bot doesn't hold onto member activity data indefinitely.
+//
+// A record's age is based on whichever is more recent: their last message,
+// their last qualifying voice time, or nothing (0) if neither ever
+// happened — that last case gets purged immediately since there's nothing
+// meaningful stored. Deleting a record does NOT change anyone's current
+// Active/Inactive role; it only removes the historical timestamp once it's
+// past the point where it could still be used to prove recent activity.
+function pruneActivityData(onlyGuildId = null) {
+  const now = Date.now();
+  let prunedCount = 0;
+  let guildsAffected = 0;
+
+  const guildIds = onlyGuildId ? [onlyGuildId] : Object.keys(activityData);
+  for (const guildId of guildIds) {
+    if (!activityData[guildId]) continue;
+    const cfg = ensureActivityGuildConfig(guildId);
+    const retentionMs = (cfg.retentionDays ?? DEFAULT_RETENTION_DAYS) * 24 * 60 * 60 * 1000;
+    const guildRecords = activityData[guildId];
+    let guildPruned = 0;
+
+    for (const userId of Object.keys(guildRecords)) {
+      const record = guildRecords[userId];
+      const lastActive = Math.max(record.lastMessageAt || 0, record.lastVoiceActiveAt || 0);
+      if (lastActive === 0 || now - lastActive > retentionMs) {
+        delete guildRecords[userId];
+        guildPruned++;
+      }
+    }
+
+    if (guildPruned > 0) {
+      prunedCount += guildPruned;
+      guildsAffected++;
+    }
+    if (Object.keys(guildRecords).length === 0) delete activityData[guildId];
+  }
+
+  if (prunedCount > 0) {
+    saveActivityData(activityData);
+    console.log(`[activity-retention] Purged ${prunedCount} stale activity record(s) across ${guildsAffected} server(s).`);
+  }
+
+  return prunedCount;
 }
 
 // ---- Reactivation button ----
@@ -553,6 +614,7 @@ function buildActivityMenuMessage(guildId) {
     .setDescription(
       `**Status:** ${cfg.enabled ? '🟢 Enabled' : '🔴 Disabled'}\n` +
         `**Threshold:** ${cfg.thresholdDays} days\n` +
+        `**Retention:** ${cfg.retentionDays ?? DEFAULT_RETENTION_DAYS} days (records auto-deleted after this)\n` +
         `**Quarantine Channel:** ${cfg.quarantineChannelId ? `<#${cfg.quarantineChannelId}>` : 'Not set'}\n` +
         `**Active Role:** ${cfg.activeRoleId ? `<@&${cfg.activeRoleId}>` : 'Not set'}\n` +
         `**Inactive Role:** ${cfg.inactiveRoleId ? `<@&${cfg.inactiveRoleId}>` : 'Not set'}\n` +
@@ -566,7 +628,7 @@ function buildActivityMenuMessage(guildId) {
       .setLabel(cfg.enabled ? 'Disable' : 'Enable')
       .setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
     new ButtonBuilder().setCustomId('setup:activity:postbutton').setLabel('Post Reactivation Button').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('setup:activity:threshold').setLabel('Set Threshold').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId('setup:activity:threshold').setLabel('Set Threshold / Retention').setStyle(ButtonStyle.Secondary)
   );
 
   const bottomRow = new ActionRowBuilder().addComponents(
@@ -842,24 +904,41 @@ client.on('interactionCreate', async (interaction) => {
 
     if (id === 'setup:activity:threshold') {
       const cfg = ensureActivityGuildConfig(guildId);
-      const modal = new ModalBuilder().setCustomId('setup:activity:threshold:modal').setTitle('Inactivity Threshold');
+      const modal = new ModalBuilder().setCustomId('setup:activity:threshold:modal').setTitle('Threshold & Data Retention');
       const daysInput = new TextInputBuilder()
         .setCustomId('days')
         .setLabel('Days of inactivity before "Inactive"')
         .setStyle(TextInputStyle.Short)
         .setValue(String(cfg.thresholdDays))
         .setRequired(true);
-      modal.addComponents(new ActionRowBuilder().addComponents(daysInput));
+      const retentionInput = new TextInputBuilder()
+        .setCustomId('retention')
+        .setLabel('Delete activity records after (days)')
+        .setStyle(TextInputStyle.Short)
+        .setValue(String(cfg.retentionDays ?? DEFAULT_RETENTION_DAYS))
+        .setRequired(true);
+      modal.addComponents(new ActionRowBuilder().addComponents(daysInput), new ActionRowBuilder().addComponents(retentionInput));
       return interaction.showModal(modal);
     }
 
     if (id === 'setup:activity:threshold:modal') {
       const days = parseInt(interaction.fields.getTextInputValue('days'), 10);
+      const retention = parseInt(interaction.fields.getTextInputValue('retention'), 10);
       if (!Number.isInteger(days) || days < 1) {
         return interaction.reply({ content: '❌ Threshold must be a whole number of days, 1 or more.', ephemeral: true });
       }
+      if (!Number.isInteger(retention) || retention < 1) {
+        return interaction.reply({ content: '❌ Retention must be a whole number of days, 1 or more.', ephemeral: true });
+      }
+      if (retention < days) {
+        return interaction.reply({
+          content: `❌ Retention (${retention} days) can't be shorter than the threshold (${days} days) — that would delete activity records before they're used to decide Active/Inactive.`,
+          ephemeral: true,
+        });
+      }
       const cfg = ensureActivityGuildConfig(guildId);
       cfg.thresholdDays = days;
+      cfg.retentionDays = retention;
       saveActivityConfig(activityConfig);
       return interaction.update(buildActivityMenuMessage(guildId));
     }
@@ -1004,29 +1083,56 @@ client.on('interactionCreate', async (interaction) => {
 // /channel-index config (unrelated to the camera policy above)
 // ============================================================
 
-// Categories to always leave out of /channel-index posts — matched by ID,
-// not name, since stylized/fancy-font category names don't reliably match
-// by text (lookalike Unicode characters aren't the same as plain letters).
-// To exclude a category: right-click it in Discord -> Copy Channel ID ->
-// paste the ID here as a string.
-const EXCLUDED_CATEGORY_IDS = [
+// ---- Channel-index config: per-guild, editable via the dashboard ----
+// Used to be hardcoded constants (single-guild only). Now stored in
+// channel-index-config.json, same pattern as camera-config.json /
+// activity-config.json, and seeded once from the original hardcoded values
+// below so xXOnlineStatusXx's existing exclusions aren't lost.
+const CHANNEL_INDEX_CONFIG_FILE = dataPath('channel-index-config.json');
+
+const LEGACY_SEED_EXCLUDED_CATEGORY_IDS = [
   '1517124026756235294', // ✦ ₊ ˚ xX☆ѕтαƒƒ ѕтuƒƒ☆Xx ˚ ₊ ✦
   '1494265392338702377',
   '1522368511123525754',
   '1522167743237984336',
 ];
+const LEGACY_SEED_EXCLUDED_CHANNEL_IDS = ['1533592609623376095', '1521265292070752286'];
+const LEGACY_SEED_EXCLUDED_NAME_KEYWORDS = ['ticket'];
 
-// Individual channels to always leave out, matched by exact channel ID.
-// Use this for one-off channels (right-click the channel -> Copy Channel ID).
-const EXCLUDED_CHANNEL_IDS = [
-  '1533592609623376095',
-  '1521265292070752286',
-];
+function loadChannelIndexConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(CHANNEL_INDEX_CONFIG_FILE, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
 
-// Individual channels to always leave out, matched by a keyword anywhere
-// in the channel's name (case-insensitive) — regardless of what category
-// they're in. Covers things like ticket-0069, ticket-0071, etc.
-const EXCLUDED_NAME_KEYWORDS = ['ticket'];
+function saveChannelIndexConfig(config) {
+  try {
+    fs.writeFileSync(CHANNEL_INDEX_CONFIG_FILE, JSON.stringify(config, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`Failed to save channel-index-config.json to ${CHANNEL_INDEX_CONFIG_FILE}:`, err.message);
+    return false;
+  }
+}
+
+let channelIndexConfig = loadChannelIndexConfig();
+
+function ensureChannelIndexGuildConfig(guildId) {
+  if (!channelIndexConfig[guildId]) {
+    // One-time seed: only the original guild inherits the old hardcoded
+    // exclusions; every other/new guild starts with a clean slate.
+    const isOriginalGuild = guildId === GUILD_ID;
+    channelIndexConfig[guildId] = {
+      excludedCategoryIds: isOriginalGuild ? [...LEGACY_SEED_EXCLUDED_CATEGORY_IDS] : [],
+      excludedChannelIds: isOriginalGuild ? [...LEGACY_SEED_EXCLUDED_CHANNEL_IDS] : [],
+      excludedNameKeywords: isOriginalGuild ? [...LEGACY_SEED_EXCLUDED_NAME_KEYWORDS] : [],
+    };
+    saveChannelIndexConfig(channelIndexConfig);
+  }
+  return channelIndexConfig[guildId];
+}
 
 // Human-readable names for Discord's channel type numbers
 const CHANNEL_TYPE_NAMES = {
@@ -1174,6 +1280,13 @@ const commands = [
     )
     .addSubcommand((sub) =>
       sub
+        .setName('set-retention')
+        .setDescription('Days before raw activity timestamps are permanently deleted (default 90)')
+        .addIntegerOption((opt) => opt.setName('days').setDescription('Number of days').setRequired(true).setMinValue(1))
+    )
+    .addSubcommand((sub) => sub.setName('purge-now').setDescription('Manually run the data-retention cleanup right now'))
+    .addSubcommand((sub) =>
+      sub
         .setName('set-quarantine-channel')
         .setDescription('The channel inactive members can still see, to reactivate themselves')
         .addChannelOption((opt) => opt.setName('channel').setDescription('Channel').setRequired(true))
@@ -1246,31 +1359,59 @@ function exportToFile(guild) {
 }
 
 // ---- descriptions.json: hand-maintained channel descriptions ----
-// Keyed by channel ID (not name) so two channels that happen to share a
-// name in different categories never collide. Each entry also stores the
+// Keyed by guild ID, then by channel ID (not name) so two channels that
+// happen to share a name in different categories — or across different
+// servers running this bot — never collide. Each entry also stores the
 // channel's current name so the file stays readable when you're editing it
 // by hand — you can see at a glance which ID belongs to which channel.
 const DESCRIPTIONS_FILE = dataPath('descriptions.json');
 
 function ensureDescriptionsFile(guild) {
-  if (fs.existsSync(DESCRIPTIONS_FILE)) return; // never overwrite your edits
+  const all = loadAllDescriptions();
+  if (all[guild.id]) return; // never overwrite existing entries for this guild
 
   const data = getChannelData(guild);
   const template = {};
   for (const ch of data) {
     template[ch.id] = { name: ch.name, description: '' };
   }
-  fs.writeFileSync(DESCRIPTIONS_FILE, JSON.stringify(template, null, 2));
-  console.log(`Created ${DESCRIPTIONS_FILE} — fill in the "description" fields whenever you're ready.`);
+  all[guild.id] = template;
+  saveAllDescriptions(all);
+  console.log(`Created descriptions for guild ${guild.id} in ${DESCRIPTIONS_FILE} — fill in the "description" fields whenever you're ready.`);
 }
 
-function loadDescriptions() {
+// Loads the whole file and migrates it once if it's still in the old flat
+// (single-guild, not guild-keyed) format — wraps the existing entries under
+// GUILD_ID so nothing already filled in gets lost.
+function loadAllDescriptions() {
+  let raw;
   try {
-    const raw = fs.readFileSync(DESCRIPTIONS_FILE, 'utf-8');
-    return JSON.parse(raw);
+    raw = JSON.parse(fs.readFileSync(DESCRIPTIONS_FILE, 'utf-8'));
   } catch {
-    return {}; // file missing or invalid — just proceed without descriptions
+    return {};
   }
+  const looksLegacyFlat = Object.values(raw).some((v) => v && typeof v === 'object' && 'name' in v && 'description' in v);
+  if (looksLegacyFlat) {
+    console.log('Migrating descriptions.json from the old flat format to per-guild format...');
+    const migrated = { [GUILD_ID]: raw };
+    saveAllDescriptions(migrated);
+    return migrated;
+  }
+  return raw;
+}
+
+function saveAllDescriptions(all) {
+  try {
+    fs.writeFileSync(DESCRIPTIONS_FILE, JSON.stringify(all, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`Failed to save descriptions.json to ${DESCRIPTIONS_FILE}:`, err.message);
+    return false;
+  }
+}
+
+function loadDescriptions(guildId) {
+  return loadAllDescriptions()[guildId] || {};
 }
 
 client.once('ready', async () => {
@@ -1288,6 +1429,12 @@ client.once('ready', async () => {
   // cache warm up), then every 6 hours after that.
   setTimeout(syncAllActivityGuilds, 30 * 1000);
   setInterval(syncAllActivityGuilds, 6 * 60 * 60 * 1000);
+
+  // Activity data retention: purge stale raw timestamps once a day. Runs a
+  // couple minutes after the first role sync so pruning never races with
+  // startup role assignment.
+  setTimeout(pruneActivityData, 2 * 60 * 1000);
+  setInterval(pruneActivityData, 24 * 60 * 60 * 1000);
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -1575,6 +1722,24 @@ client.on('interactionCreate', async (interaction) => {
         guildConfig.thresholdDays = days;
         saveActivityConfig(activityConfig);
         await interaction.reply(`✅ Inactivity threshold set to **${days} day(s)**.`);
+      } else if (sub === 'set-retention') {
+        const days = interaction.options.getInteger('days');
+        if (days < guildConfig.thresholdDays) {
+          await interaction.reply({
+            content: `❌ Retention (${days} days) can't be shorter than your inactivity threshold (${guildConfig.thresholdDays} days) — that would delete activity records before they've even been used to decide Active/Inactive.`,
+            ephemeral: true,
+          });
+        } else {
+          guildConfig.retentionDays = days;
+          saveActivityConfig(activityConfig);
+          await interaction.reply(`✅ Activity records will now be automatically deleted after **${days} day(s)**.`);
+        }
+      } else if (sub === 'purge-now') {
+        const pruned = pruneActivityData(interaction.guildId);
+        await interaction.reply({
+          content: pruned > 0 ? `✅ Purged **${pruned}** stale activity record(s) for this server.` : '✅ Nothing to purge — no records here are past the retention window.',
+          ephemeral: true,
+        });
       } else if (sub === 'set-quarantine-channel') {
         const channel = interaction.options.getChannel('channel');
         guildConfig.quarantineChannelId = channel.id;
@@ -1592,12 +1757,14 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: `✅ Button posted in **#${channel.name}**.`, ephemeral: true });
         }
       } else if (sub === 'status') {
+        const storedRecordCount = Object.keys(activityData[interaction.guildId] || {}).length;
         const embed = new EmbedBuilder()
           .setColor(guildConfig.enabled ? 0x00cc66 : 0x999999)
           .setTitle('Activity Tracker Status')
           .addFields(
             { name: 'Enabled', value: guildConfig.enabled ? 'Yes' : 'No', inline: true },
             { name: 'Threshold', value: `${guildConfig.thresholdDays} days`, inline: true },
+            { name: 'Retention', value: `${guildConfig.retentionDays ?? DEFAULT_RETENTION_DAYS} days`, inline: true },
             { name: 'Active role', value: guildConfig.activeRoleId ? `<@&${guildConfig.activeRoleId}>` : 'Not set', inline: true },
             { name: 'Inactive role', value: guildConfig.inactiveRoleId ? `<@&${guildConfig.inactiveRoleId}>` : 'Not set', inline: true },
             {
@@ -1608,6 +1775,10 @@ client.on('interactionCreate', async (interaction) => {
             {
               name: 'Exempt roles',
               value: guildConfig.exemptRoleIds.length ? guildConfig.exemptRoleIds.map((id) => `<@&${id}>`).join(', ') : 'None',
+            },
+            {
+              name: 'Records currently stored',
+              value: `${storedRecordCount} member(s) — automatically deleted after ${guildConfig.retentionDays ?? DEFAULT_RETENTION_DAYS} day(s) of inactivity`,
             }
           );
         await interaction.reply({ embeds: [embed], ephemeral: true });
@@ -1635,16 +1806,16 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply();
       const categoryFilter = interaction.options.getString('category');
       const data = getChannelData(interaction.guild, categoryFilter);
+      const indexCfg = ensureChannelIndexGuildConfig(interaction.guildId);
 
       // Group by category for a clean, readable post — skipping any
-      // categories in EXCLUDED_CATEGORY_IDS, and any individual channels
-      // whose name contains a keyword from EXCLUDED_NAME_KEYWORDS (e.g. tickets).
+      // categories/channels/keywords excluded via the dashboard or /setup.
       const byCategory = {};
       for (const ch of data) {
-        if (ch.categoryId && EXCLUDED_CATEGORY_IDS.includes(ch.categoryId)) continue;
-        if (EXCLUDED_CHANNEL_IDS.includes(ch.id)) continue;
+        if (ch.categoryId && indexCfg.excludedCategoryIds.includes(ch.categoryId)) continue;
+        if (indexCfg.excludedChannelIds.includes(ch.id)) continue;
         const nameLower = ch.name.toLowerCase();
-        if (EXCLUDED_NAME_KEYWORDS.some((kw) => nameLower.includes(kw))) continue;
+        if (indexCfg.excludedNameKeywords.some((kw) => nameLower.includes(kw))) continue;
 
         const key = ch.category || 'No Category';
         if (!byCategory[key]) byCategory[key] = [];
@@ -1660,7 +1831,7 @@ client.on('interactionCreate', async (interaction) => {
       const MAX_FIELDS_PER_EMBED = 25;
       const MAX_CHARS_PER_EMBED = 5500; // buffer under Discord's 6000 limit
 
-      const descriptions = loadDescriptions();
+      const descriptions = loadDescriptions(interaction.guildId);
 
       const categoryEntries = Object.entries(byCategory);
       const embeds = [];
@@ -1889,6 +2060,731 @@ client.on('error', (err) => {
 
 process.on('unhandledRejection', (err) => {
   console.error('Unhandled rejection (bot stays online):', err);
+});
+
+// ============================================================
+// Web Dashboard — bundled into this same process, same as the Discord
+// bot. Single shared password (DASHBOARD_PASSWORD, set as a Railway
+// Variable) gates the whole thing — this is a personal admin tool, not a
+// per-server-admin login system. Every page reads/writes the exact same
+// config objects and functions the Discord side uses, so the dashboard
+// and /setup are always in sync.
+// ============================================================
+const express = require('express');
+const session = require('express-session');
+const crypto = require('crypto');
+
+const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD;
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const PORT = process.env.PORT || 3000;
+
+if (!DASHBOARD_PASSWORD) {
+  console.warn('DASHBOARD_PASSWORD is not set — the dashboard will refuse all logins until you set it as a Railway Variable.');
+}
+if (!process.env.SESSION_SECRET) {
+  console.warn('SESSION_SECRET is not set — using a random secret generated at startup, so everyone gets logged out on every restart. Set SESSION_SECRET as a Railway Variable to avoid that.');
+}
+
+const app = express();
+app.set('trust proxy', 1); // Railway sits behind a proxy — needed for secure cookies to work
+app.use(express.urlencoded({ extended: true, limit: '3mb' })); // raised limit: the descriptions editor can post one field per channel
+
+app.use(
+  session({
+    secret: SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      secure: !!process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    },
+  })
+);
+
+function timingSafeStringEqual(a, b) {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function requireAuth(req, res, next) {
+  if (req.session && req.session.authenticated) return next();
+  return res.redirect('/login');
+}
+
+// Express gives a bare string for one checked box, an array for 2+, and
+// undefined for zero — this normalizes all three to always be an array.
+function asArray(val) {
+  if (val === undefined) return [];
+  return Array.isArray(val) ? val : [val];
+}
+
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function resolveGuildId(req) {
+  const requested = req.query.guild || req.body?.guild;
+  if (requested && client.guilds.cache.has(requested)) return requested;
+  if (client.guilds.cache.has(GUILD_ID)) return GUILD_ID;
+  const first = client.guilds.cache.first();
+  return first ? first.id : null;
+}
+
+// ---- Shared page shell: header nav + guild switcher + dark theme ----
+function renderLayout({ title, guildId, currentPath, body, flash }) {
+  const guilds = [...client.guilds.cache.values()];
+  const guildOptions = guilds
+    .map((g) => `<option value="${g.id}" ${g.id === guildId ? 'selected' : ''}>${escapeHtml(g.name)}</option>`)
+    .join('');
+
+  const navItems = [
+    { path: '/', label: 'Overview' },
+    { path: '/camera', label: 'Camera Policy' },
+    { path: '/activity', label: 'Activity Tracker' },
+    { path: '/channel-index', label: 'Channel Index' },
+  ];
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${escapeHtml(title)} — G33KY Bot Dashboard</title>
+<style>
+  :root {
+    --bg: #0d0d12; --panel: #17171f; --panel-border: #2a2a36;
+    --accent: #b83df0; --accent-2: #ff2fb0;
+    --text: #eaeaf2; --text-dim: #9a9aab;
+    --green: #2ecc71; --red: #ff4d6d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; min-height: 100vh; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: #0d0d14; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; background: linear-gradient(90deg, #1a0f24, #14141c); border-bottom: 1px solid var(--panel-border); flex-wrap: wrap; gap: 12px; }
+  header h1 { font-size: 18px; margin: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  nav a { padding: 8px 14px; border-radius: 8px; color: var(--text-dim); font-size: 14px; font-weight: 500; }
+  nav a:hover { color: var(--text); text-decoration: none; background: var(--panel); }
+  nav a.active { color: #fff; background: var(--accent); }
+  .topright { display: flex; align-items: center; gap: 10px; }
+  select, input[type=text], input[type=number], input[type=password], textarea {
+    background: #0d0d14; border: 1px solid var(--panel-border); color: var(--text);
+    border-radius: 6px; padding: 8px 10px; font-size: 14px; font-family: inherit;
+  }
+  main { padding: 24px; max-width: 1000px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+  .card h2 { margin-top: 0; font-size: 16px; }
+  .card h3 { font-size: 13px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 10px; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .stat { background: #0d0d14; border: 1px solid var(--panel-border); border-radius: 10px; padding: 14px; }
+  .stat .num { font-size: 24px; font-weight: 700; }
+  .stat .label { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.on { background: rgba(46,204,113,0.15); color: var(--green); }
+  .pill.off { background: rgba(255,77,109,0.15); color: var(--red); }
+  form { margin: 0; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 12px; color: var(--text-dim); }
+  .checklist { max-height: 220px; overflow-y: auto; background: #0d0d14; border: 1px solid var(--panel-border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .check-item { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+  .check-item input { accent-color: var(--accent); }
+  button, .btn { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 9px 16px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:hover, .btn:hover { opacity: 0.9; }
+  button.secondary { background: #2a2a36; }
+  button.danger { background: var(--red); }
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+  .flash { background: rgba(184,61,240,0.15); border: 1px solid var(--accent); padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table th, table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--panel-border); }
+  table input[type=text] { width: 100%; }
+  .muted { color: var(--text-dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚙️ G33KY Bot</h1>
+  <nav>
+    ${navItems.map((n) => `<a href="${n.path}?guild=${guildId || ''}" class="${n.path === currentPath ? 'active' : ''}">${n.label}</a>`).join('')}
+  </nav>
+  <div class="topright">
+    <form method="GET" action="${currentPath}">
+      <select name="guild" onchange="this.form.submit()">${guildOptions}</select>
+    </form>
+    <a href="/logout" class="btn secondary" style="padding:8px 14px;">Log out</a>
+  </div>
+</header>
+<main>
+  ${flash ? `<div class="flash">${escapeHtml(flash)}</div>` : ''}
+  ${body}
+</main>
+</body>
+</html>`;
+}
+
+// ---- Auth routes (unprotected) ----
+app.get('/login', (req, res) => {
+  if (req.session?.authenticated) return res.redirect('/');
+  const error = req.query.error ? '<div class="flash" style="border-color:var(--red);">Incorrect password.</div>' : '';
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Log in — G33KY Bot Dashboard</title>
+  <style>
+    body { margin:0; background:#0d0d12; color:#eaeaf2; font-family:-apple-system,sans-serif; }
+    .wrap { display:flex; align-items:center; justify-content:center; min-height:100vh; }
+    .card { background:#17171f; border:1px solid #2a2a36; border-radius:14px; padding:32px; width:300px; text-align:center; }
+    h1 { background: linear-gradient(90deg,#b83df0,#ff2fb0); -webkit-background-clip:text; background-clip:text; color:transparent; font-size:20px; }
+    input { width:100%; margin:14px 0; padding:10px; border-radius:6px; border:1px solid #2a2a36; background:#0d0d14; color:#eaeaf2; box-sizing:border-box; }
+    button { width:100%; padding:10px; border-radius:8px; border:none; background:#b83df0; color:#fff; font-weight:600; cursor:pointer; }
+    .flash { background:rgba(255,77,109,0.15); border:1px solid #ff4d6d; padding:8px; border-radius:8px; font-size:13px; margin-bottom:10px; }
+  </style></head><body>
+  <div class="wrap"><div class="card">
+    <h1>⚙️ G33KY Bot</h1>
+    ${error}
+    <form method="POST" action="/login">
+      <input type="password" name="password" placeholder="Dashboard password" autofocus required>
+      <button type="submit">Log in</button>
+    </form>
+  </div></div>
+  </body></html>`);
+});
+
+app.post('/login', (req, res) => {
+  if (!DASHBOARD_PASSWORD) {
+    return res.status(503).send('Dashboard password is not configured. Set DASHBOARD_PASSWORD as a Railway Variable, then redeploy.');
+  }
+  const { password } = req.body;
+  if (password && timingSafeStringEqual(password, DASHBOARD_PASSWORD)) {
+    req.session.authenticated = true;
+    return res.redirect('/');
+  }
+  return res.redirect('/login?error=1');
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => res.redirect('/login'));
+});
+
+app.get('/health', (req, res) => res.status(200).send('ok')); // for Railway's healthcheck, unauthenticated on purpose
+
+app.use(requireAuth); // everything below this line requires a logged-in session
+
+// ---- Overview ----
+app.get('/', async (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) {
+    return res.send(
+      renderLayout({
+        title: 'Overview',
+        guildId: null,
+        currentPath: '/',
+        body: `<div class="card"><p>No servers loaded yet — the bot may still be starting up. Refresh in a moment.</p></div>`,
+      })
+    );
+  }
+
+  const guild = client.guilds.cache.get(guildId);
+  await guild.members.fetch().catch(() => {}); // best-effort, for accurate Active/Inactive counts
+
+  const camCfg = ensureGuildConfig(guildId);
+  const actCfg = ensureActivityGuildConfig(guildId);
+  const idxCfg = ensureChannelIndexGuildConfig(guildId);
+
+  const inGraceOrWarning = [...warnedUsers.keys()].filter((k) => k.startsWith(`${guildId}:`)).length;
+  const activeCount = actCfg.activeRoleId ? guild.roles.cache.get(actCfg.activeRoleId)?.members.size ?? 0 : 0;
+  const inactiveCount = actCfg.inactiveRoleId ? guild.roles.cache.get(actCfg.inactiveRoleId)?.members.size ?? 0 : 0;
+  const storedRecords = Object.keys(activityData[guildId] || {}).length;
+  const totalChannels = guild.channels.cache.filter((c) => c.type !== ChannelType.GuildCategory).size;
+  const descriptions = loadDescriptions(guildId);
+  const descFilled = Object.values(descriptions).filter((d) => d.description && d.description.trim()).length;
+
+  const body = `
+    <div class="card">
+      <h2>${escapeHtml(guild.name)}</h2>
+      <div class="stat-grid">
+        <div class="stat"><div class="num">${guild.memberCount}</div><div class="label">Members</div></div>
+        <div class="stat"><div class="num">${totalChannels}</div><div class="label">Channels</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>📷 Camera Policy</h3>
+      <p><span class="pill ${camCfg.enabled ? 'on' : 'off'}">${camCfg.enabled ? 'ENABLED' : 'DISABLED'}</span></p>
+      <div class="stat-grid">
+        <div class="stat"><div class="num">${camCfg.monitoredChannels.length}</div><div class="label">Monitored channels</div></div>
+        <div class="stat"><div class="num">${camCfg.exemptRoles.length}</div><div class="label">Exempt roles</div></div>
+        <div class="stat"><div class="num">${inGraceOrWarning}</div><div class="label">Currently in grace/warning</div></div>
+      </div>
+      <p style="margin-top:12px;"><a href="/camera?guild=${guildId}">Configure →</a></p>
+    </div>
+
+    <div class="card">
+      <h3>📊 Activity Tracker</h3>
+      <p><span class="pill ${actCfg.enabled ? 'on' : 'off'}">${actCfg.enabled ? 'ENABLED' : 'DISABLED'}</span></p>
+      <div class="stat-grid">
+        <div class="stat"><div class="num">${activeCount}</div><div class="label">Active members</div></div>
+        <div class="stat"><div class="num">${inactiveCount}</div><div class="label">Inactive members</div></div>
+        <div class="stat"><div class="num">${storedRecords}</div><div class="label">Stored activity records</div></div>
+        <div class="stat"><div class="num">${actCfg.thresholdDays}d</div><div class="label">Threshold</div></div>
+        <div class="stat"><div class="num">${actCfg.retentionDays ?? DEFAULT_RETENTION_DAYS}d</div><div class="label">Retention</div></div>
+      </div>
+      <p style="margin-top:12px;"><a href="/activity?guild=${guildId}">Configure →</a></p>
+    </div>
+
+    <div class="card">
+      <h3># Channel Index</h3>
+      <div class="stat-grid">
+        <div class="stat"><div class="num">${idxCfg.excludedCategoryIds.length}</div><div class="label">Excluded categories</div></div>
+        <div class="stat"><div class="num">${idxCfg.excludedChannelIds.length}</div><div class="label">Excluded channels</div></div>
+        <div class="stat"><div class="num">${descFilled}/${totalChannels}</div><div class="label">Descriptions filled in</div></div>
+      </div>
+      <p style="margin-top:12px;"><a href="/channel-index?guild=${guildId}">Configure →</a></p>
+    </div>
+  `;
+  res.send(renderLayout({ title: 'Overview', guildId, currentPath: '/', body, flash: req.query.flash }));
+});
+
+// ---- Camera Policy ----
+app.get('/camera', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.redirect('/');
+  const cfg = ensureGuildConfig(guildId);
+
+  const voiceChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice).values()].sort((a, b) => a.rawPosition - b.rawPosition);
+  const textChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement).values()].sort((a, b) => a.rawPosition - b.rawPosition);
+  const roles = [...guild.roles.cache.filter((r) => r.id !== guild.id).values()].sort((a, b) => b.position - a.position);
+
+  const channelChecklist =
+    voiceChannels.map((c) => `<label class="check-item"><input type="checkbox" name="monitoredChannels" value="${c.id}" ${cfg.monitoredChannels.includes(c.id) ? 'checked' : ''}> #${escapeHtml(c.name)}</label>`).join('') ||
+    '<p class="muted">No voice channels found.</p>';
+  const roleChecklist =
+    roles.map((r) => `<label class="check-item"><input type="checkbox" name="exemptRoles" value="${r.id}" ${cfg.exemptRoles.includes(r.id) ? 'checked' : ''}> ${escapeHtml(r.name)}</label>`).join('') ||
+    '<p class="muted">No roles found.</p>';
+  const announceOptions = textChannels.map((c) => `<option value="${c.id}" ${cfg.announcementChannelId === c.id ? 'selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
+
+  const body = `
+    <div class="card">
+      <h2>📷 Camera Policy — ${escapeHtml(guild.name)}</h2>
+      <p><span class="pill ${cfg.enabled ? 'on' : 'off'}">${cfg.enabled ? 'ENABLED' : 'DISABLED'}</span>
+      ${cfg.announcementUrl ? ` · <a href="${cfg.announcementUrl}" target="_blank" rel="noopener">View posted announcement ↗</a>` : ''}</p>
+      <form method="POST" action="/camera/toggle">
+        <input type="hidden" name="guild" value="${guildId}">
+        <button class="${cfg.enabled ? 'danger' : ''}" type="submit">${cfg.enabled ? 'Disable' : 'Enable'}</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <form method="POST" action="/camera/save">
+        <input type="hidden" name="guild" value="${guildId}">
+        <h3>Timing</h3>
+        <div class="row">
+          <div class="field"><label>Grace period (minutes)</label><input type="number" name="graceMinutes" min="0" value="${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES}"></div>
+          <div class="field"><label>Warning period (minutes)</label><input type="number" name="warningMinutes" min="1" value="${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES}"></div>
+        </div>
+        <h3>Monitored voice channels</h3>
+        <div class="checklist">${channelChecklist}</div>
+        <h3 style="margin-top:16px;">Exempt roles</h3>
+        <div class="checklist">${roleChecklist}</div>
+        <div class="btn-row"><button type="submit">Save Changes</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>Exempt role</h3>
+      <p class="muted">Creates a new Discord role and adds it to the exempt list above.</p>
+      <form method="POST" action="/camera/create-exempt-role">
+        <input type="hidden" name="guild" value="${guildId}">
+        <button class="secondary" type="submit">Create Exempt Role</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>Post policy announcement</h3>
+      <form method="POST" action="/camera/announce">
+        <input type="hidden" name="guild" value="${guildId}">
+        <div class="row">
+          <div class="field" style="min-width:220px;">
+            <label>Channel</label>
+            <select name="channelId"><option value="">-- select a channel --</option>${announceOptions}</select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Policy text</label>
+          <textarea name="text" rows="5" style="width:100%;">Cameras must be ON while in monitored voice channels.
+
+If your camera is off, you'll get a silent ${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES} minute grace period, then a reminder, then ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES} more minute(s) before you're moved out of the channel. Turning your camera back on at any point cancels the timer.</textarea>
+        </div>
+        <div class="btn-row"><button type="submit">Post Announcement</button></div>
+      </form>
+    </div>
+  `;
+  res.send(renderLayout({ title: 'Camera Policy', guildId, currentPath: '/camera', body, flash: req.query.flash }));
+});
+
+app.post('/camera/toggle', (req, res) => {
+  const guildId = req.body.guild;
+  const cfg = ensureGuildConfig(guildId);
+  cfg.enabled = !cfg.enabled;
+  saveCameraConfig(cameraConfig);
+  if (!cfg.enabled) clearAllCameraWarningsForGuild(guildId);
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent(cfg.enabled ? 'Camera policy enabled.' : 'Camera policy disabled.')}`);
+});
+
+app.post('/camera/save', (req, res) => {
+  const guildId = req.body.guild;
+  const cfg = ensureGuildConfig(guildId);
+  const grace = parseInt(req.body.graceMinutes, 10);
+  const warning = parseInt(req.body.warningMinutes, 10);
+  if (Number.isInteger(grace) && grace >= 0) cfg.graceMinutes = grace;
+  if (Number.isInteger(warning) && warning >= 1) cfg.warningMinutes = warning;
+  cfg.monitoredChannels = asArray(req.body.monitoredChannels);
+  cfg.exemptRoles = asArray(req.body.exemptRoles);
+  saveCameraConfig(cameraConfig);
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('Saved.')}`);
+});
+
+app.post('/camera/create-exempt-role', async (req, res) => {
+  const guildId = req.body.guild;
+  const guild = client.guilds.cache.get(guildId);
+  const cfg = ensureGuildConfig(guildId);
+  try {
+    const role = await guild.roles.create({ name: 'Camera Policy Exempt', color: 0x3498db, reason: 'Created via dashboard' });
+    cfg.exemptRoles.push(role.id);
+    saveCameraConfig(cameraConfig);
+    res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('Created role: ' + role.name)}`);
+  } catch (err) {
+    res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('Failed to create role — check the bot has Manage Roles. (' + err.message + ')')}`);
+  }
+});
+
+app.post('/camera/announce', async (req, res) => {
+  const guildId = req.body.guild;
+  const guild = client.guilds.cache.get(guildId);
+  const cfg = ensureGuildConfig(guildId);
+  const { channelId, text } = req.body;
+  if (!channelId || !text) {
+    return res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('Pick a channel and enter text first.')}`);
+  }
+  try {
+    const channel = await guild.channels.fetch(channelId);
+    const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('📷 Camera Policy').setDescription(text).setTimestamp();
+    const message = await channel.send({ embeds: [embed] });
+    cfg.announcementChannelId = channelId;
+    cfg.announcementUrl = `https://discord.com/channels/${guildId}/${channel.id}/${message.id}`;
+    saveCameraConfig(cameraConfig);
+    res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('Announcement posted.')}`);
+  } catch (err) {
+    res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('Failed to post — check the bot can send messages there. (' + err.message + ')')}`);
+  }
+});
+
+// ---- Activity Tracker ----
+app.get('/activity', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.redirect('/');
+  const cfg = ensureActivityGuildConfig(guildId);
+
+  const roles = [...guild.roles.cache.filter((r) => r.id !== guild.id).values()].sort((a, b) => b.position - a.position);
+  const textChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement).values()].sort((a, b) => a.rawPosition - b.rawPosition);
+  const voiceChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice).values()].sort((a, b) => a.rawPosition - b.rawPosition);
+  const allTrackableChannels = [...textChannels, ...voiceChannels];
+
+  const roleOptions = (selectedId) => roles.map((r) => `<option value="${r.id}" ${r.id === selectedId ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
+  const exemptChecklist =
+    roles.map((r) => `<label class="check-item"><input type="checkbox" name="exemptRoles" value="${r.id}" ${cfg.exemptRoleIds.includes(r.id) ? 'checked' : ''}> ${escapeHtml(r.name)}</label>`).join('') ||
+    '<p class="muted">No roles found.</p>';
+  const quarantineOptions = textChannels.map((c) => `<option value="${c.id}" ${cfg.quarantineChannelId === c.id ? 'selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
+  const monitoredChecklist =
+    allTrackableChannels.map((c) => `<label class="check-item"><input type="checkbox" name="monitoredChannels" value="${c.id}" ${cfg.monitoredChannels.includes(c.id) ? 'checked' : ''}> #${escapeHtml(c.name)}</label>`).join('') ||
+    '<p class="muted">No channels found.</p>';
+  const storedRecordCount = Object.keys(activityData[guildId] || {}).length;
+
+  const body = `
+    <div class="card">
+      <h2>📊 Activity Tracker — ${escapeHtml(guild.name)}</h2>
+      <p><span class="pill ${cfg.enabled ? 'on' : 'off'}">${cfg.enabled ? 'ENABLED' : 'DISABLED'}</span></p>
+      <form method="POST" action="/activity/toggle">
+        <input type="hidden" name="guild" value="${guildId}">
+        <button class="${cfg.enabled ? 'danger' : ''}" type="submit">${cfg.enabled ? 'Disable' : 'Enable'}</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <form method="POST" action="/activity/save-roles">
+        <input type="hidden" name="guild" value="${guildId}">
+        <h3>Roles</h3>
+        <div class="row">
+          <div class="field"><label>Active role</label><select name="activeRoleId"><option value="">-- none --</option>${roleOptions(cfg.activeRoleId)}</select></div>
+          <div class="field"><label>Inactive role</label><select name="inactiveRoleId"><option value="">-- none --</option>${roleOptions(cfg.inactiveRoleId)}</select></div>
+        </div>
+        <h3>Exempt roles</h3>
+        <div class="checklist">${exemptChecklist}</div>
+        <div class="btn-row"><button type="submit">Save Roles</button></div>
+      </form>
+      <div class="btn-row">
+        <form method="POST" action="/activity/create-role"><input type="hidden" name="guild" value="${guildId}"><input type="hidden" name="type" value="active"><button class="secondary" type="submit">Create Active Role</button></form>
+        <form method="POST" action="/activity/create-role"><input type="hidden" name="guild" value="${guildId}"><input type="hidden" name="type" value="inactive"><button class="secondary" type="submit">Create Inactive Role</button></form>
+        <form method="POST" action="/activity/create-role"><input type="hidden" name="guild" value="${guildId}"><input type="hidden" name="type" value="exempt"><button class="secondary" type="submit">Create Exempt Role</button></form>
+      </div>
+    </div>
+
+    <div class="card">
+      <form method="POST" action="/activity/save-channels">
+        <input type="hidden" name="guild" value="${guildId}">
+        <h3>Channels</h3>
+        <div class="field"><label>Quarantine / reactivation channel</label><select name="quarantineChannelId"><option value="">-- none --</option>${quarantineOptions}</select></div>
+        <h3 style="margin-top:16px;">Monitored channels (empty = track everywhere)</h3>
+        <div class="checklist">${monitoredChecklist}</div>
+        <div class="btn-row"><button type="submit">Save Channels</button></div>
+      </form>
+      <div class="btn-row">
+        <form method="POST" action="/activity/create-channel"><input type="hidden" name="guild" value="${guildId}"><button class="secondary" type="submit">Create Reactivation Channel</button></form>
+        <form method="POST" action="/activity/post-button"><input type="hidden" name="guild" value="${guildId}"><button class="secondary" type="submit">Post Reactivation Button</button></form>
+      </div>
+    </div>
+
+    <div class="card">
+      <form method="POST" action="/activity/save-timing">
+        <input type="hidden" name="guild" value="${guildId}">
+        <h3>Threshold & retention</h3>
+        <div class="row">
+          <div class="field"><label>Inactivity threshold (days)</label><input type="number" name="thresholdDays" min="1" value="${cfg.thresholdDays}"></div>
+          <div class="field"><label>Data retention (days)</label><input type="number" name="retentionDays" min="1" value="${cfg.retentionDays ?? DEFAULT_RETENTION_DAYS}"></div>
+        </div>
+        <div class="btn-row"><button type="submit">Save</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>Data</h3>
+      <p class="muted">${storedRecordCount} activity record(s) currently stored for this server.</p>
+      <form method="POST" action="/activity/purge-now">
+        <input type="hidden" name="guild" value="${guildId}">
+        <button class="secondary" type="submit">Purge Stale Records Now</button>
+      </form>
+    </div>
+  `;
+  res.send(renderLayout({ title: 'Activity Tracker', guildId, currentPath: '/activity', body, flash: req.query.flash }));
+});
+
+app.post('/activity/toggle', (req, res) => {
+  const guildId = req.body.guild;
+  const cfg = ensureActivityGuildConfig(guildId);
+  if (!cfg.enabled && (!cfg.activeRoleId || !cfg.inactiveRoleId)) {
+    return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Set both Active and Inactive roles before enabling.')}`);
+  }
+  cfg.enabled = !cfg.enabled;
+  saveActivityConfig(activityConfig);
+  if (cfg.enabled) syncActivityRoles(client.guilds.cache.get(guildId));
+  res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent(cfg.enabled ? 'Activity tracking enabled.' : 'Activity tracking disabled.')}`);
+});
+
+app.post('/activity/save-roles', (req, res) => {
+  const guildId = req.body.guild;
+  const cfg = ensureActivityGuildConfig(guildId);
+  cfg.activeRoleId = req.body.activeRoleId || null;
+  cfg.inactiveRoleId = req.body.inactiveRoleId || null;
+  cfg.exemptRoleIds = asArray(req.body.exemptRoles);
+  saveActivityConfig(activityConfig);
+  res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Roles saved.')}`);
+});
+
+app.post('/activity/save-channels', (req, res) => {
+  const guildId = req.body.guild;
+  const cfg = ensureActivityGuildConfig(guildId);
+  cfg.quarantineChannelId = req.body.quarantineChannelId || null;
+  cfg.monitoredChannels = asArray(req.body.monitoredChannels);
+  saveActivityConfig(activityConfig);
+  res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Channels saved.')}`);
+});
+
+app.post('/activity/save-timing', (req, res) => {
+  const guildId = req.body.guild;
+  const cfg = ensureActivityGuildConfig(guildId);
+  const days = parseInt(req.body.thresholdDays, 10);
+  const retention = parseInt(req.body.retentionDays, 10);
+  if (!Number.isInteger(days) || days < 1) {
+    return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Threshold must be 1+ days.')}`);
+  }
+  if (!Number.isInteger(retention) || retention < days) {
+    return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Retention must be at least as long as the threshold.')}`);
+  }
+  cfg.thresholdDays = days;
+  cfg.retentionDays = retention;
+  saveActivityConfig(activityConfig);
+  res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Saved.')}`);
+});
+
+app.post('/activity/create-role', async (req, res) => {
+  const guildId = req.body.guild;
+  const guild = client.guilds.cache.get(guildId);
+  const cfg = ensureActivityGuildConfig(guildId);
+  const roleSpecs = {
+    active: { name: 'Active Member', color: 0x00cc66 },
+    inactive: { name: 'Inactive Member', color: 0x999999 },
+    exempt: { name: 'Activity Tracker Exempt', color: 0x3498db },
+  };
+  const spec = roleSpecs[req.body.type];
+  if (!spec) return res.redirect(`/activity?guild=${guildId}`);
+  try {
+    const role = await guild.roles.create({ name: spec.name, color: spec.color, reason: 'Created via dashboard' });
+    if (req.body.type === 'active') cfg.activeRoleId = role.id;
+    else if (req.body.type === 'inactive') cfg.inactiveRoleId = role.id;
+    else cfg.exemptRoleIds.push(role.id);
+    saveActivityConfig(activityConfig);
+    res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Created role: ' + role.name)}`);
+  } catch (err) {
+    res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Failed to create role — check the bot has Manage Roles. (' + err.message + ')')}`);
+  }
+});
+
+app.post('/activity/create-channel', async (req, res) => {
+  const guildId = req.body.guild;
+  const guild = client.guilds.cache.get(guildId);
+  const cfg = ensureActivityGuildConfig(guildId);
+  try {
+    const permissionOverwrites = [];
+    if (cfg.inactiveRoleId) permissionOverwrites.push({ id: cfg.inactiveRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] });
+    const channel = await guild.channels.create({ name: 're-activate', type: ChannelType.GuildText, reason: 'Created via dashboard', permissionOverwrites });
+    cfg.quarantineChannelId = channel.id;
+    saveActivityConfig(activityConfig);
+    res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Created #' + channel.name)}`);
+  } catch (err) {
+    res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Failed to create channel — check the bot has Manage Channels. (' + err.message + ')')}`);
+  }
+});
+
+app.post('/activity/post-button', async (req, res) => {
+  const guildId = req.body.guild;
+  const guild = client.guilds.cache.get(guildId);
+  const cfg = ensureActivityGuildConfig(guildId);
+  if (!cfg.quarantineChannelId) {
+    return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Set a quarantine channel first.')}`);
+  }
+  try {
+    const channel = await guild.channels.fetch(cfg.quarantineChannelId);
+    const { embed, row } = buildReactivationEmbedAndRow();
+    await channel.send({ embeds: [embed], components: [row] });
+    res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Button posted in #' + channel.name)}`);
+  } catch (err) {
+    res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Failed to post — check the bot can send messages there. (' + err.message + ')')}`);
+  }
+});
+
+app.post('/activity/purge-now', (req, res) => {
+  const guildId = req.body.guild;
+  const pruned = pruneActivityData(guildId);
+  res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent(pruned > 0 ? `Purged ${pruned} stale record(s).` : 'Nothing to purge.')}`);
+});
+
+// ---- Channel Index ----
+app.get('/channel-index', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.redirect('/');
+  const cfg = ensureChannelIndexGuildConfig(guildId);
+
+  const categories = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildCategory).values()].sort((a, b) => a.rawPosition - b.rawPosition);
+  const allChannels = getChannelData(guild);
+
+  const categoryChecklist =
+    categories.map((c) => `<label class="check-item"><input type="checkbox" name="excludedCategoryIds" value="${c.id}" ${cfg.excludedCategoryIds.includes(c.id) ? 'checked' : ''}> ${escapeHtml(c.name)}</label>`).join('') ||
+    '<p class="muted">No categories found.</p>';
+  const channelChecklist =
+    allChannels
+      .map(
+        (c) =>
+          `<label class="check-item"><input type="checkbox" name="excludedChannelIds" value="${c.id}" ${cfg.excludedChannelIds.includes(c.id) ? 'checked' : ''}> #${escapeHtml(c.name)} ${
+            c.category ? `<span class="muted">(${escapeHtml(c.category)})</span>` : ''
+          }</label>`
+      )
+      .join('') || '<p class="muted">No channels found.</p>';
+
+  const descriptions = loadDescriptions(guildId);
+  const descRows = allChannels
+    .map(
+      (c) => `
+    <tr>
+      <td>#${escapeHtml(c.name)}</td>
+      <td class="muted">${escapeHtml(c.category || '—')}</td>
+      <td><input type="text" name="desc_${c.id}" value="${escapeHtml(descriptions[c.id]?.description || '')}" placeholder="Optional blurb..."></td>
+    </tr>`
+    )
+    .join('');
+
+  const body = `
+    <div class="card">
+      <h2># Channel Index — ${escapeHtml(guild.name)}</h2>
+      <p class="muted">Controls what <code>/channel-index</code> leaves out when it posts. Doesn't affect the channels themselves.</p>
+    </div>
+
+    <div class="card">
+      <form method="POST" action="/channel-index/save-exclusions">
+        <input type="hidden" name="guild" value="${guildId}">
+        <h3>Excluded categories</h3>
+        <div class="checklist">${categoryChecklist}</div>
+        <h3 style="margin-top:16px;">Excluded channels</h3>
+        <div class="checklist">${channelChecklist}</div>
+        <h3 style="margin-top:16px;">Excluded name keywords</h3>
+        <div class="field"><label>One per line — any channel whose name contains one of these is skipped</label>
+        <textarea name="excludedNameKeywords" rows="3" style="width:100%;">${escapeHtml(cfg.excludedNameKeywords.join('\n'))}</textarea></div>
+        <div class="btn-row"><button type="submit">Save Exclusions</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>Channel descriptions</h3>
+      <p class="muted">Shown next to each channel in the posted index.</p>
+      <form method="POST" action="/channel-index/save-descriptions">
+        <input type="hidden" name="guild" value="${guildId}">
+        <table>
+          <thead><tr><th>Channel</th><th>Category</th><th>Description</th></tr></thead>
+          <tbody>${descRows}</tbody>
+        </table>
+        <div class="btn-row"><button type="submit">Save Descriptions</button></div>
+      </form>
+    </div>
+  `;
+  res.send(renderLayout({ title: 'Channel Index', guildId, currentPath: '/channel-index', body, flash: req.query.flash }));
+});
+
+app.post('/channel-index/save-exclusions', (req, res) => {
+  const guildId = req.body.guild;
+  const cfg = ensureChannelIndexGuildConfig(guildId);
+  cfg.excludedCategoryIds = asArray(req.body.excludedCategoryIds);
+  cfg.excludedChannelIds = asArray(req.body.excludedChannelIds);
+  cfg.excludedNameKeywords = String(req.body.excludedNameKeywords || '')
+    .split('\n')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  saveChannelIndexConfig(channelIndexConfig);
+  res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('Exclusions saved.')}`);
+});
+
+app.post('/channel-index/save-descriptions', (req, res) => {
+  const guildId = req.body.guild;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.redirect('/');
+  const allChannels = getChannelData(guild);
+  const all = loadAllDescriptions();
+  const guildDescriptions = all[guildId] || {};
+  for (const c of allChannels) {
+    const value = req.body[`desc_${c.id}`];
+    guildDescriptions[c.id] = { name: c.name, description: (value || '').trim() };
+  }
+  all[guildId] = guildDescriptions;
+  saveAllDescriptions(all);
+  res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('Descriptions saved.')}`);
+});
+
+app.listen(PORT, () => {
+  console.log(`Dashboard listening on port ${PORT}`);
 });
 
 client.login(TOKEN);

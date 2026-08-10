@@ -1,0 +1,178 @@
+G33KY BOT TERMS OF SERVICE
+
+**Effective Date:** [8/8/2026]
+**Last Updated:** [8/8/2026]
+
+Welcome to **G33KY Bot** ("G33KY," "the Bot," "we," "us," or "our").
+
+By adding, configuring, or using G33KY BOT in a Discord server, you agree to these Terms of Service ("Terms"). If you do not agree with these Terms, do not add or use the Bot.
+
+1. What G33KY BOT Does
+
+G33KY BOT is a Discord community-management bot that provides configurable server-management features, including:
+
+* Voice-channel camera policy enforcement
+* Camera reminders and configurable grace periods
+* Automatic voice-channel removal when configured requirements are not met
+* Member activity tracking
+* Active/inactive role management
+* Voice participation tracking
+* Activity-based member status
+* Self-service member reactivation
+* Role-based exemptions
+* Channel indexing and related server-management utilities
+
+Features available to a server depend on how that server's administrators configure the Bot.
+
+2. Discord
+
+G33KY BOT operates through Discord and is dependent upon Discord's services, APIs, permissions, and availability.
+
+Your use of Discord remains subject to **Discord's own Terms of Service, Community Guidelines, Privacy Policy, and other applicable Discord policies**.
+
+G33KY BOT is an independent third-party application and is not owned, operated, endorsed, or sponsored by Discord unless expressly stated otherwise.
+
+3. Server Administrator Responsibility
+
+The person or organization configuring G33KY BOT for a Discord server is responsible for:
+
+* Configuring the Bot appropriately
+* Selecting monitored voice channels
+* Selecting active and inactive roles
+* Configuring activity thresholds
+* Configuring exempt roles
+* Establishing appropriate server permissions
+* Informing server members about applicable server rules and policies
+* Ensuring the Bot's use complies with applicable laws and regulations
+
+Server administrators are responsible for determining whether camera requirements, activity requirements, role restrictions, or other automated moderation policies are appropriate for their community.
+
+G33KY BOT provides tools for enforcement. **G33KY BOT does not determine what rules a server should have.**
+
+4. Camera Policy
+
+When enabled by a server administrator, G33KY BOT may monitor whether a member's camera is enabled while the member is in a designated voice channel.
+
+The default camera system provides:
+
+* A silent grace period
+* A warning/reminder
+* A configurable countdown
+* Removal from the monitored voice channel if the requirement is not met
+
+The default configuration is a **2-minute silent grace period followed by a 3-minute warning period**, although server administrators may change these settings. 
+
+Members with designated exemption roles may be excluded from camera enforcement. 
+
+G33KY BOT does **not record, save, or transmit camera video to G33KY BOT'S operators** as part of this feature. The Bot uses Discord's voice-state information to determine whether the camera requirement is satisfied.
+
+5. Activity Tracking
+
+When Activity Tracking is enabled, G33KY BOT records limited participation information for members.
+
+By default, a member may be considered active when they:
+
+* Send a message in the server, or
+* Spend at least one continuous minute in a voice channel.
+
+The default activity window is **30 days**, and the threshold can be configured by the server administrator. 
+
+G33KY BOT records the **most recent qualifying activity timestamps**, rather than storing a complete history of every message or voice session. 
+
+6. Automated Roles and Restrictions
+
+G33KY BOT may automatically assign or remove server roles based on the configuration established by server administrators.
+
+A server may use those roles to control access to channels or other server features.
+
+G33KY BOT itself does not create or modify Discord channel permission overwrites for the activity system. Any restrictions associated with an inactive role are configured by the server administrator through Discord's normal permission system. 
+
+7. Reactivation
+
+A server may provide inactive members with a self-service reactivation button.
+
+Using the reactivation feature records a new activity timestamp and may restore the member's Active role and remove the Inactive role, depending on server configuration. 
+
+8. Exemptions
+
+Server administrators may designate Discord roles as exempt from applicable G33KY BOT activity tracking or camera enforcement.
+
+Exemptions are controlled by individual Discord server administrators and may be changed or removed at any time.
+
+9. Permissions
+
+G33KY BOT may require Discord permissions and gateway intents necessary to perform its features.
+
+Certain features, including removing members from voice channels, require appropriate Discord permissions. 
+
+If required permissions are removed or denied, some features may not function correctly.
+
+10. Acceptable Use
+
+You agree not to use G33KY BOT to:
+
+* Violate applicable laws or regulations
+* Harass, threaten, stalk, or target individuals
+* Circumvent Discord security or access controls
+* Abuse Discord's API or services
+* Attempt to interfere with the Bot's operation
+* Reverse engineer or exploit the Bot for malicious purposes
+* Use the Bot to facilitate unlawful activity
+
+We reserve the right to restrict or terminate access to G33KY BOT where reasonably necessary to protect the Bot, its infrastructure, Discord communities, or other users.
+
+11. Availability
+
+G33KY BOT is provided on an **"as is" and "as available"** basis.
+
+We do not guarantee that:
+
+* G33KY BOT will always be online
+* Commands will always respond immediately
+* Discord events will always be received
+* Activity calculations will always be uninterrupted
+* Role changes will always succeed
+* Voice removals will always succeed
+* Data will never be lost
+
+Third-party outages, Discord API changes, hosting failures, network problems, permissions, and other circumstances may affect the Bot.
+
+12. No Guarantee of Moderation Results
+
+G33KY BOT is an automation tool.
+
+We do not guarantee that its use will prevent harassment, misconduct, inactivity, unauthorized access, or other behavior within a Discord server.
+
+Server administrators remain responsible for moderation decisions and community management.
+
+13. Intellectual Property
+
+G33KY BOT, including its software, branding, graphics, documentation, and original content, is owned by [G33KY BOT] unless otherwise stated.
+
+You may not copy, redistribute, sell, sublicense, or commercially exploit G33KY BOT or its proprietary materials without authorization.
+
+14. Termination
+
+We may discontinue G33KY BOT, suspend access, modify features, or terminate service at any time.
+
+Server administrators may remove G33KY BOT from their Discord server at any time.
+
+15. Limitation of Liability
+
+To the maximum extent permitted by applicable law, [G33KY BOT] will not be liable for indirect, incidental, consequential, special, exemplary, or punitive damages arising from or related to the use or inability to use G33KY BOT.
+
+16. Changes to These Terms
+
+We may update these Terms from time to time.
+
+Updated Terms will be posted at:
+
+[TERMS URL]
+
+Your continued use of G33KY BOT after updated Terms become effective constitutes acceptance of the revised Terms, to the extent permitted by applicable law.
+
+17. Contact
+
+Questions regarding these Terms may be sent to:
+
+dragon.exe@atomicmail.io

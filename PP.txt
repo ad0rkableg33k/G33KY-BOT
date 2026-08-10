@@ -1,0 +1,210 @@
+G33KY BOT PRIVACY POLICY
+
+**Effective Date:** [8/8/2026]
+**Last Updated:** [8/8/2026]
+
+This Privacy Policy explains how **G33KY Bot** ("G33KY," "we," "us," or "our") collects, uses, stores, and protects information when the Bot is used in a Discord server.
+
+1. Information We Collect
+
+G33KY BOT collects only information reasonably necessary to provide its configured features.
+
+Depending on which features a server administrator enables, this may include:
+
+Discord Account Information
+
+G33KY BOT may receive information provided by Discord, including:
+
+* Discord user ID
+* Discord server/guild ID
+* Server membership information
+* Discord roles
+* Username or display information when required for a command
+* Server join information where required for activity calculations
+
+### Activity Information
+
+When Activity Tracking is enabled, G33KY BOT records:
+
+* Discord user ID
+* Server ID
+* Time of the member's most recent qualifying message activity
+* Time of the member's most recent qualifying voice activity
+
+The current implementation stores these activity records in `activity-data.json`. 
+
+Voice Activity
+
+G33KY BOT may detect when a member:
+
+* Joins a voice channel
+* Leaves a voice channel
+* Changes voice channels
+* Remains in voice long enough to satisfy the configured activity threshold
+
+For Activity Tracking, the Bot records the resulting qualifying activity timestamp rather than maintaining a permanent record of every voice session. 
+
+Message Activity
+
+When Activity Tracking is enabled, G33KY BOT observes server messages for the purpose of determining whether a member has participated.
+
+The Bot records the **time of the member's latest qualifying message**, not the message's content, for the Activity Tracking feature. 
+
+Camera Status
+
+When the Camera Policy is enabled, G33KY BOT receives relevant Discord voice-state information to determine whether a member's camera is enabled.
+
+G33KY BOT does not need to record or store the member's actual camera video to perform this feature.
+
+2. Information We Do Not Intentionally Collect
+
+G33KY BOT does not intentionally collect or store:
+
+* Camera recordings
+* Microphone recordings
+* Audio recordings
+* Copies of members' message content for Activity Tracking
+* Private messages for Activity Tracking
+* Passwords
+* Discord account credentials
+* Payment card information
+
+G33KY BOT's Activity Tracker is designed around activity timestamps rather than storing a complete message history. 
+
+## 3. How We Use Information
+
+Information collected by G33KY BOT is used to:
+
+* Determine member activity status
+* Assign Active or Inactive roles
+* Determine whether camera requirements are satisfied
+* Send camera reminders
+* Remove members from monitored voice channels when configured
+* Process member reactivation
+* Provide administrator commands
+* Maintain server-specific configuration
+* Diagnose technical problems and maintain the Bot
+
+4. Server-Specific Configuration
+
+G33KY BOT stores configuration separately for each Discord server.
+
+Camera configuration may include:
+
+* Whether the camera policy is enabled
+* Monitored voice channels
+* Exempt roles
+* Grace-period settings
+* Warning-period settings
+* Policy announcement link
+
+This configuration is stored by server ID. 
+
+Activity configuration may include:
+
+* Enabled/disabled status
+* Active role
+* Inactive role
+* Activity threshold
+* Reactivation/quarantine channel
+* Exempt roles
+
+5. Data Storage
+
+G33KY BOT currently stores configuration and activity information in local application data files.
+
+These may include:
+
+* `camera-config.json`
+* `activity-config.json`
+* `activity-data.json`
+* `channels.json`
+* `descriptions.json`
+
+The location of these files depends on the hosting environment. 
+
+If G33KY BOT is hosted using a third-party hosting provider, that provider may have access to infrastructure on which the Bot operates, subject to that provider's own policies.
+
+6. Discord and Third-Party Services
+
+G33KY BOT relies on Discord's API and infrastructure.
+
+Information transmitted through Discord is also subject to Discord's own policies.
+
+G33KY BOT may also rely on third-party hosting or infrastructure providers to operate the Bot.
+
+Those providers may process information as necessary to provide hosting, networking, storage, monitoring, or other infrastructure services.
+
+7. Data Retention
+
+G33KY BOT's Activity Tracker uses a rolling activity window, which defaults to **30 days** but may be changed by the server administrator. This window determines whether a member is currently considered Active or Inactive.
+
+Separately, G33KY BOT automatically deletes the underlying activity records themselves. By default, a member's stored activity timestamps (`lastMessageAt` and `lastVoiceActiveAt`) are permanently deleted after **90 days**, unless the server administrator has configured a different retention period. Retention cannot be configured shorter than the server's activity window, so a record is never deleted before it could still be used to determine a member's status.
+
+This cleanup runs automatically on a recurring schedule. Server administrators can also view the number of activity records currently stored for their server, and may trigger the cleanup manually, using the Bot's administrator commands.
+
+Deleting a stored record does not, by itself, change a member's current Active or Inactive role — a record old enough to be deleted has already aged past the activity window and would already reflect Inactive status.
+
+8. Data Security
+
+We take reasonable measures designed to protect information processed by G33KY BOT.
+
+However, no electronic storage or transmission system can be guaranteed to be completely secure.
+
+You acknowledge that use of Internet-based services carries inherent security risks.
+
+9. Server Administrators
+
+The administrator of a Discord server decides whether to enable G33KY BOT's features and determines how those features are configured.
+
+Server administrators may therefore control:
+
+* Whether Activity Tracking is enabled
+* Activity thresholds
+* Active/Inactive roles
+* Camera monitoring
+* Camera timing
+* Exemptions
+* Reactivation settings
+
+Members with questions about why G33KY BOT is being used in a particular server should first contact that server's administrators.
+
+10. Your Privacy Choices
+
+Depending on applicable law, you may have rights regarding personal information, including rights to:
+
+* Request access to information associated with you
+* Request correction of inaccurate information
+* Request deletion of information
+* Object to or restrict certain processing
+* Request additional information about how your information is processed
+
+Because G33KY BOT operates within Discord servers controlled by independent administrators, some requests may need to be directed to the relevant server administrator.
+
+Requests concerning G33KY BOT's own processing may be sent to:
+
+dragon.exe@atomicmail.io
+
+## 11. Children's Privacy
+
+G33KY BOT is not specifically directed toward children.
+
+You must comply with Discord's age requirements and applicable laws when using Discord and G33KY.
+
+If we become aware that we have collected personal information in violation of applicable law, we will take reasonable steps to address the situation.
+
+## 12. Changes to This Privacy Policy
+
+We may update this Privacy Policy when our practices, features, or legal obligations change.
+
+The current version will be available at:
+
+**[PRIVACY POLICY URL]**
+
+## 13. Contact
+
+Privacy questions or requests may be sent to:
+
+dragon.exe@atomicmail.io
+
+G33KY BOT
