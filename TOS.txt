@@ -85,7 +85,7 @@ G33KY BOT may automatically assign or remove server roles based on the configura
 
 A server may use those roles to control access to channels or other server features.
 
-G33KY BOT itself does not create or modify Discord channel permission overwrites for the activity system. Any restrictions associated with an inactive role are configured by the server administrator through Discord's normal permission system. 
+G33KY BOT itself does not automatically create or modify Discord channel permission overwrites unless a server administrator explicitly enables this feature. When a server administrator explicitly triggers the Activity Tracker's channel-restriction feature, G33KY BOT will edit permission overwrites for the configured Inactive role across the server's channels, denying that role the ability to view, send messages in, or read the message history of channels other than the designated quarantine/reactivation channel, and applying the same restriction automatically to channels created afterward. This feature only acts on the Inactive role's own permission overwrites, and only when a server administrator has affirmatively turned it on; it is never applied automatically or without administrator action. Server administrators may choose not to enable this feature and instead configure any restrictions associated with an inactive role manually, through Discord's normal permission system.
 
 7. Reactivation
 
