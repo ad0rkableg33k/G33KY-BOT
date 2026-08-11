@@ -3,10 +3,10 @@
 // - Registers a /channel-index slash command that posts a formatted
 //   list of channels (name + link) into whatever channel it's run in
 // - Enforces an optional, per-server "cameras-on" voice channel policy
+// - Enforces an activity tracking system with quarantine capabilities
 //
-// This script does NOT rename, delete, or modify any channels.
-// It only reads channel info, moves people out of voice when the camera
-// policy says to, and posts messages.
+// This script modifies channel permissions ONLY when manually synced via
+// the sync-permissions command/buttons to lock inactive members to quarantine.
 
 require('dotenv').config();
 const fs = require('fs');
@@ -205,19 +205,11 @@ function seedCameraConfigIfNeeded() {
 // ============================================================
 // Activity tracker — PER-SERVER self-service config
 // ============================================================
-// Tracks whether a member has sent a message and/or spent >=1 minute in a
-// voice channel within a rolling window (default 30 days). Assigns an
-// "Active" role or "Inactive" role. Inactive members get a self-service
-// reactivation button (posted via /activity-tracker post-button) — clicking
-// it counts as new activity and swaps their role instantly. The actual
-// "quarantine" restriction (limiting inactive members to one channel) is
-// done with normal Discord permission overwrites on the Inactive role, set
-// up once by the server — this bot never touches channel permissions.
 
 const ACTIVITY_CONFIG_FILE = dataPath('activity-config.json');
 const ACTIVITY_DATA_FILE = dataPath('activity-data.json');
 const DEFAULT_THRESHOLD_DAYS = 30;
-const DEFAULT_RETENTION_DAYS = 90; // how long a raw activity timestamp is kept before being purged entirely
+const DEFAULT_RETENTION_DAYS = 90;
 const ACTIVITY_VOICE_MINUTES_REQUIRED = 1;
 
 function loadActivityConfig() {
@@ -253,7 +245,6 @@ function ensureActivityGuildConfig(guildId) {
       retentionDays: DEFAULT_RETENTION_DAYS,
     };
   }
-  // Normalize configs saved before these fields existed
   if (activityConfig[guildId].monitoredChannels === undefined) {
     activityConfig[guildId].monitoredChannels = [];
   }
@@ -292,13 +283,7 @@ function getMemberActivity(guildId, userId) {
 }
 
 // ---- Voice tracking ----
-// A member counts as "voice active" once they've spent >=1 continuous
-// minute in ANY voice channel in the server (not just monitored camera
-// channels — this is a separate, independent feature). Tracked via an
-// in-memory join-time map, finalized on leave/switch, and swept
-// periodically so long-running sessions count without requiring the
-// member to ever leave.
-const activityVoiceSessions = new Map(); // "guildId:userId" -> { joinedAt, channelId }
+const activityVoiceSessions = new Map();
 const ACTIVITY_VOICE_MS_REQUIRED = ACTIVITY_VOICE_MINUTES_REQUIRED * 60 * 1000;
 
 function markVoiceActive(guildId, userId) {
@@ -312,8 +297,6 @@ function finalizeActivityVoiceSession(guildId, userId, key) {
   activityVoiceSessions.delete(key);
   if (!session) return;
   const cfg = ensureActivityGuildConfig(guildId);
-  // Empty monitoredChannels = track everywhere (default). Non-empty = only
-  // count voice time spent in one of the picked channels.
   if (cfg.monitoredChannels.length && !cfg.monitoredChannels.includes(session.channelId)) return;
   if (Date.now() - session.joinedAt >= ACTIVITY_VOICE_MS_REQUIRED) {
     markVoiceActive(guildId, userId);
@@ -337,22 +320,9 @@ client.on('voiceStateUpdate', (oldState, newState) => {
   }
 });
 
-// ---- Reconciliation: credit anyone CURRENTLY connected to voice ----
-// The join/leave tracking above only sees people who join *while the bot
-// is running*. If someone is already mid-call at the exact moment the bot
-// restarts (which happens on every redeploy), the bot never sees a "join"
-// for them — so when they eventually leave, there's no session to close
-// and their voice time silently goes uncounted, no matter how long they
-// were actually connected. This directly scans who's really in voice right
-// now (via Discord's own live state, not our possibly-stale in-memory map)
-// and credits them outright, then refreshes their session so join/leave
-// tracking stays consistent going forward. Runs once at startup — so a
-// redeploy can never erase someone's in-progress call — and on the same
-// periodic schedule as the sweep below, so it's self-healing against any
-// future missed events too (e.g. a brief Gateway reconnect gap).
 async function reconcileConnectedVoiceMembers() {
   for (const guild of client.guilds.cache.values()) {
-    await guild.members.fetch().catch(() => {}); // needed so channel.members resolves correctly
+    await guild.members.fetch().catch(() => {});
     const cfg = ensureActivityGuildConfig(guild.id);
     for (const channel of guild.channels.cache.values()) {
       if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildStageVoice) continue;
@@ -366,9 +336,6 @@ async function reconcileConnectedVoiceMembers() {
   }
 }
 
-// Sweep every 5 min: reconcile who's actually connected right now (fixes
-// the restart edge case above and self-heals missed events), and also
-// finalize any tracked session that's crossed the 1-minute mark.
 setInterval(async () => {
   await reconcileConnectedVoiceMembers();
   const now = Date.now();
@@ -386,18 +353,48 @@ setInterval(async () => {
 client.on('messageCreate', (message) => {
   if (!message.guild || message.author.bot) return;
   const cfg = ensureActivityGuildConfig(message.guild.id);
-  // Empty monitoredChannels = track everywhere (default). Non-empty = only
-  // count messages sent in one of the picked channels.
   if (cfg.monitoredChannels.length && !cfg.monitoredChannels.includes(message.channel.id)) return;
   const activity = getMemberActivity(message.guild.id, message.author.id);
   activity.lastMessageAt = Date.now();
   saveActivityData(activityData);
 });
 
+// ---- Quarantine Permissions Helper ----
+async function enforceQuarantinePermissions(guild) {
+  const config = ensureActivityGuildConfig(guild.id);
+  if (!config.inactiveRoleId) throw new Error("No Inactive role set. Please configure it first.");
+  if (!config.quarantineChannelId) throw new Error("No quarantine channel set. Please configure it first.");
+
+  const channels = await guild.channels.fetch();
+  let updated = 0;
+
+  for (const channel of channels.values()) {
+    if (!channel) continue;
+    try {
+      if (channel.id === config.quarantineChannelId) {
+        // Quarantine channel: Allow View & Read History, Deny Send (only click button needed)
+        await channel.permissionOverwrites.edit(config.inactiveRoleId, {
+          ViewChannel: true,
+          ReadMessageHistory: true,
+          SendMessages: false
+        });
+      } else {
+        // All other channels: Strict Deny 
+        await channel.permissionOverwrites.edit(config.inactiveRoleId, {
+          ViewChannel: false,
+          SendMessages: false,
+          ReadMessageHistory: false
+        });
+      }
+      updated++;
+    } catch (err) {
+      console.error(`Failed to update perms for ${channel.id}:`, err.message);
+    }
+  }
+  return updated;
+}
+
 // ---- Role sync (scheduled) ----
-// Runs once ~30s after startup, then every 6 hours. Also callable on-demand
-// via /activity-tracker check (for one member) — full-server sync only runs
-// on the schedule so we're not hammering the API on every command.
 async function syncActivityRoles(guild) {
   const config = ensureActivityGuildConfig(guild.id);
   if (!config.enabled || !config.activeRoleId || !config.inactiveRoleId) return;
@@ -413,8 +410,6 @@ async function syncActivityRoles(guild) {
     const activity = activityData[guild.id]?.[member.id];
     const lastMessageAt = activity?.lastMessageAt || 0;
     const lastVoiceActiveAt = activity?.lastVoiceActiveAt || 0;
-    // Brand-new members get a grace period — join date counts as their
-    // baseline "last active" so nobody gets quarantined the day they join.
     const joinedAt = member.joinedTimestamp || 0;
     const lastActive = Math.max(lastMessageAt, lastVoiceActiveAt, joinedAt);
 
@@ -440,19 +435,6 @@ async function syncAllActivityGuilds() {
   }
 }
 
-// ---- Data retention: automatically purge raw activity timestamps once
-// they're older than each guild's configured retention window (default 90
-// days). This is separate from thresholdDays (which only decides the
-// Active/Inactive role) — retentionDays decides how long the underlying
-// lastMessageAt/lastVoiceActiveAt record is kept on disk at all, so the
-// bot doesn't hold onto member activity data indefinitely.
-//
-// A record's age is based on whichever is more recent: their last message,
-// their last qualifying voice time, or nothing (0) if neither ever
-// happened — that last case gets purged immediately since there's nothing
-// meaningful stored. Deleting a record does NOT change anyone's current
-// Active/Inactive role; it only removes the historical timestamp once it's
-// past the point where it could still be used to prove recent activity.
 function pruneActivityData(onlyGuildId = null) {
   const now = Date.now();
   let prunedCount = 0;
@@ -536,11 +518,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ============================================================
-// Unified /setup menu — interactive wizard for camera policy +
-// activity tracker, so admins never have to type role/channel IDs or
-// remember subcommand names. Everything reuses the exact same config
-// objects/functions as the slash commands above — the menu is just
-// another way to edit the same camera-config.json / activity-config.json.
+// Unified /setup menu 
 // ============================================================
 
 function clearAllCameraWarningsForGuild(guildId) {
@@ -633,9 +611,6 @@ function buildCameraMenuMessage(guildId) {
   };
 }
 
-// ---- Activity tracker menu: split across 3 pages (main / roles / channels)
-// because Discord caps messages at 5 component rows and this feature has
-// more pickers than camera policy does.
 function buildActivityMenuMessage(guildId) {
   const cfg = ensureActivityGuildConfig(guildId);
 
@@ -725,6 +700,7 @@ function buildActivityChannelsMenuMessage(guildId) {
 
   const buttonRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('setup:activity:create-quarantine-channel').setLabel('Create Reactivation Channel').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:activity:sync-perms').setLabel('🔒 Sync Channel Perms').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('setup:activity:menu').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary)
   );
 
@@ -769,7 +745,6 @@ client.on('interactionCreate', async (interaction) => {
     const guildId = interaction.guildId;
     const id = interaction.customId;
 
-    // ---- Navigation ----
     if (id === 'setup:main') return interaction.update(buildMainMenuMessage());
     if (id === 'setup:main:select') {
       const choice = interaction.values[0];
@@ -797,47 +772,32 @@ client.on('interactionCreate', async (interaction) => {
       }
       return;
     }
-
     if (id === 'setup:camera:channels:select') {
       const cfg = ensureGuildConfig(guildId);
       cfg.monitoredChannels = interaction.values;
       saveCameraConfig(cameraConfig);
       return interaction.update(buildCameraMenuMessage(guildId));
     }
-
     if (id === 'setup:camera:exempt:select') {
       const cfg = ensureGuildConfig(guildId);
       cfg.exemptRoles = interaction.values;
       saveCameraConfig(cameraConfig);
       return interaction.update(buildCameraMenuMessage(guildId));
     }
-
     if (id === 'setup:camera:announce-channel:select') {
       const cfg = ensureGuildConfig(guildId);
       cfg.announcementChannelId = interaction.values[0] || null;
       saveCameraConfig(cameraConfig);
       return interaction.update(buildCameraMenuMessage(guildId));
     }
-
     if (id === 'setup:camera:timing') {
       const cfg = ensureGuildConfig(guildId);
       const modal = new ModalBuilder().setCustomId('setup:camera:timing:modal').setTitle('Camera Policy Timing');
-      const graceInput = new TextInputBuilder()
-        .setCustomId('grace')
-        .setLabel('Grace period (minutes, silent)')
-        .setStyle(TextInputStyle.Short)
-        .setValue(String(cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES))
-        .setRequired(true);
-      const warningInput = new TextInputBuilder()
-        .setCustomId('warning')
-        .setLabel('Warning period (minutes, after reminder)')
-        .setStyle(TextInputStyle.Short)
-        .setValue(String(cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES))
-        .setRequired(true);
+      const graceInput = new TextInputBuilder().setCustomId('grace').setLabel('Grace period (minutes, silent)').setStyle(TextInputStyle.Short).setValue(String(cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES)).setRequired(true);
+      const warningInput = new TextInputBuilder().setCustomId('warning').setLabel('Warning period (minutes, after reminder)').setStyle(TextInputStyle.Short).setValue(String(cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES)).setRequired(true);
       modal.addComponents(new ActionRowBuilder().addComponents(graceInput), new ActionRowBuilder().addComponents(warningInput));
       return interaction.showModal(modal);
     }
-
     if (id === 'setup:camera:timing:modal') {
       const grace = parseInt(interaction.fields.getTextInputValue('grace'), 10);
       const warning = parseInt(interaction.fields.getTextInputValue('warning'), 10);
@@ -850,7 +810,6 @@ client.on('interactionCreate', async (interaction) => {
       saveCameraConfig(cameraConfig);
       return interaction.update(buildCameraMenuMessage(guildId));
     }
-
     if (id === 'setup:camera:create-exempt-role') {
       const cfg = ensureGuildConfig(guildId);
       try {
@@ -863,37 +822,19 @@ client.on('interactionCreate', async (interaction) => {
         saveCameraConfig(cameraConfig);
         await interaction.update(buildCameraMenuMessage(guildId));
       } catch (err) {
-        console.error('Failed to create camera exempt role:', err.message);
-        await interaction.reply({
-          content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`,
-          ephemeral: true,
-        });
+        await interaction.reply({ content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`, ephemeral: true });
       }
       return;
     }
-
     if (id === 'setup:camera:announce-post') {
       const cfg = ensureGuildConfig(guildId);
-      if (!cfg.announcementChannelId) {
-        return interaction.reply({ content: '❌ Pick an announcement channel below first.', ephemeral: true });
-      }
-      const defaultText =
-        'Cameras must be ON while in monitored voice channels.\n\n' +
-        `If your camera is off, you'll get a silent ${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES} minute grace period, then a reminder, ` +
-        `then ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES} more minute(s) before you're moved out of the channel. ` +
-        'Turning your camera back on at any point cancels the timer.';
+      if (!cfg.announcementChannelId) return interaction.reply({ content: '❌ Pick an announcement channel below first.', ephemeral: true });
+      const defaultText = `Cameras must be ON while in monitored voice channels.\n\nIf your camera is off, you'll get a silent ${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES} minute grace period, then a reminder, then ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES} more minute(s) before you're moved out of the channel. Turning your camera back on at any point cancels the timer.`;
       const modal = new ModalBuilder().setCustomId('setup:camera:announce-post:modal').setTitle('Post Camera Policy Announcement');
-      const textInput = new TextInputBuilder()
-        .setCustomId('text')
-        .setLabel('Policy text')
-        .setStyle(TextInputStyle.Paragraph)
-        .setValue(defaultText)
-        .setRequired(true)
-        .setMaxLength(3500);
+      const textInput = new TextInputBuilder().setCustomId('text').setLabel('Policy text').setStyle(TextInputStyle.Paragraph).setValue(defaultText).setRequired(true).setMaxLength(3500);
       modal.addComponents(new ActionRowBuilder().addComponents(textInput));
       return interaction.showModal(modal);
     }
-
     if (id === 'setup:camera:announce-post:modal') {
       const cfg = ensureGuildConfig(guildId);
       const text = interaction.fields.getTextInputValue('text');
@@ -905,11 +846,7 @@ client.on('interactionCreate', async (interaction) => {
         saveCameraConfig(cameraConfig);
         await interaction.update(buildCameraMenuMessage(guildId));
       } catch (err) {
-        console.error('Failed to post camera policy announcement:', err.message);
-        await interaction.reply({
-          content: `❌ Couldn't post that — make sure I can send messages and embed links in that channel. (${err.message})`,
-          ephemeral: true,
-        });
+        await interaction.reply({ content: `❌ Couldn't post that — make sure I can send messages and embed links in that channel. (${err.message})`, ephemeral: true });
       }
       return;
     }
@@ -925,60 +862,34 @@ client.on('interactionCreate', async (interaction) => {
       if (cfg.enabled) syncActivityRoles(interaction.guild);
       await interaction.update(buildActivityMenuMessage(guildId));
       if (!saved) {
-        await interaction.followUp({
-          content: "⚠️ This didn't save to disk — it'll revert if the bot restarts. Check Railway logs for a DATA_DIR write error.",
-          ephemeral: true,
-        });
+        await interaction.followUp({ content: "⚠️ This didn't save to disk — it'll revert if the bot restarts. Check Railway logs for a DATA_DIR write error.", ephemeral: true });
       }
       return;
     }
-
     if (id === 'setup:activity:threshold') {
       const cfg = ensureActivityGuildConfig(guildId);
       const modal = new ModalBuilder().setCustomId('setup:activity:threshold:modal').setTitle('Threshold & Data Retention');
-      const daysInput = new TextInputBuilder()
-        .setCustomId('days')
-        .setLabel('Days of inactivity before "Inactive"')
-        .setStyle(TextInputStyle.Short)
-        .setValue(String(cfg.thresholdDays))
-        .setRequired(true);
-      const retentionInput = new TextInputBuilder()
-        .setCustomId('retention')
-        .setLabel('Delete activity records after (days)')
-        .setStyle(TextInputStyle.Short)
-        .setValue(String(cfg.retentionDays ?? DEFAULT_RETENTION_DAYS))
-        .setRequired(true);
+      const daysInput = new TextInputBuilder().setCustomId('days').setLabel('Days of inactivity before "Inactive"').setStyle(TextInputStyle.Short).setValue(String(cfg.thresholdDays)).setRequired(true);
+      const retentionInput = new TextInputBuilder().setCustomId('retention').setLabel('Delete activity records after (days)').setStyle(TextInputStyle.Short).setValue(String(cfg.retentionDays ?? DEFAULT_RETENTION_DAYS)).setRequired(true);
       modal.addComponents(new ActionRowBuilder().addComponents(daysInput), new ActionRowBuilder().addComponents(retentionInput));
       return interaction.showModal(modal);
     }
-
     if (id === 'setup:activity:threshold:modal') {
       const days = parseInt(interaction.fields.getTextInputValue('days'), 10);
       const retention = parseInt(interaction.fields.getTextInputValue('retention'), 10);
-      if (!Number.isInteger(days) || days < 1) {
-        return interaction.reply({ content: '❌ Threshold must be a whole number of days, 1 or more.', ephemeral: true });
-      }
-      if (!Number.isInteger(retention) || retention < 1) {
-        return interaction.reply({ content: '❌ Retention must be a whole number of days, 1 or more.', ephemeral: true });
-      }
-      if (retention < days) {
-        return interaction.reply({
-          content: `❌ Retention (${retention} days) can't be shorter than the threshold (${days} days) — that would delete activity records before they're used to decide Active/Inactive.`,
-          ephemeral: true,
-        });
-      }
+      if (!Number.isInteger(days) || days < 1) return interaction.reply({ content: '❌ Threshold must be a whole number of days, 1 or more.', ephemeral: true });
+      if (!Number.isInteger(retention) || retention < 1) return interaction.reply({ content: '❌ Retention must be a whole number of days, 1 or more.', ephemeral: true });
+      if (retention < days) return interaction.reply({ content: `❌ Retention (${retention} days) can't be shorter than the threshold (${days} days) — that would delete activity records before they're used to decide Active/Inactive.`, ephemeral: true });
+      
       const cfg = ensureActivityGuildConfig(guildId);
       cfg.thresholdDays = days;
       cfg.retentionDays = retention;
       saveActivityConfig(activityConfig);
       return interaction.update(buildActivityMenuMessage(guildId));
     }
-
     if (id === 'setup:activity:postbutton') {
       const cfg = ensureActivityGuildConfig(guildId);
-      if (!cfg.quarantineChannelId) {
-        return interaction.reply({ content: '❌ Pick a quarantine channel in the Channels page first.', ephemeral: true });
-      }
+      if (!cfg.quarantineChannelId) return interaction.reply({ content: '❌ Pick a quarantine channel in the Channels page first.', ephemeral: true });
       const channel = await interaction.guild.channels.fetch(cfg.quarantineChannelId);
       const { embed: btnEmbed, row: btnRow } = buildReactivationEmbedAndRow();
       await channel.send({ embeds: [btnEmbed], components: [btnRow] });
@@ -992,21 +903,18 @@ client.on('interactionCreate', async (interaction) => {
       saveActivityConfig(activityConfig);
       return interaction.update(buildActivityRolesMenuMessage(guildId));
     }
-
     if (id === 'setup:activity:inactiverole:select') {
       const cfg = ensureActivityGuildConfig(guildId);
       cfg.inactiveRoleId = interaction.values[0];
       saveActivityConfig(activityConfig);
       return interaction.update(buildActivityRolesMenuMessage(guildId));
     }
-
     if (id === 'setup:activity:exempt:select') {
       const cfg = ensureActivityGuildConfig(guildId);
       cfg.exemptRoleIds = interaction.values;
       saveActivityConfig(activityConfig);
       return interaction.update(buildActivityRolesMenuMessage(guildId));
     }
-
     if (id === 'setup:activity:create-active-role') {
       const cfg = ensureActivityGuildConfig(guildId);
       try {
@@ -1015,12 +923,10 @@ client.on('interactionCreate', async (interaction) => {
         saveActivityConfig(activityConfig);
         await interaction.update(buildActivityRolesMenuMessage(guildId));
       } catch (err) {
-        console.error('Failed to create Active Member role:', err.message);
         await interaction.reply({ content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`, ephemeral: true });
       }
       return;
     }
-
     if (id === 'setup:activity:create-inactive-role') {
       const cfg = ensureActivityGuildConfig(guildId);
       try {
@@ -1029,12 +935,10 @@ client.on('interactionCreate', async (interaction) => {
         saveActivityConfig(activityConfig);
         await interaction.update(buildActivityRolesMenuMessage(guildId));
       } catch (err) {
-        console.error('Failed to create Inactive Member role:', err.message);
         await interaction.reply({ content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`, ephemeral: true });
       }
       return;
     }
-
     if (id === 'setup:activity:create-exempt-role') {
       const cfg = ensureActivityGuildConfig(guildId);
       try {
@@ -1043,7 +947,6 @@ client.on('interactionCreate', async (interaction) => {
         saveActivityConfig(activityConfig);
         await interaction.update(buildActivityRolesMenuMessage(guildId));
       } catch (err) {
-        console.error('Failed to create activity exempt role:', err.message);
         await interaction.reply({ content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`, ephemeral: true });
       }
       return;
@@ -1056,14 +959,12 @@ client.on('interactionCreate', async (interaction) => {
       saveActivityConfig(activityConfig);
       return interaction.update(buildActivityChannelsMenuMessage(guildId));
     }
-
     if (id === 'setup:activity:channels:select') {
       const cfg = ensureActivityGuildConfig(guildId);
       cfg.monitoredChannels = interaction.values;
       saveActivityConfig(activityConfig);
       return interaction.update(buildActivityChannelsMenuMessage(guildId));
     }
-
     if (id === 'setup:activity:create-quarantine-channel') {
       const cfg = ensureActivityGuildConfig(guildId);
       try {
@@ -1071,7 +972,8 @@ client.on('interactionCreate', async (interaction) => {
         if (cfg.inactiveRoleId) {
           permissionOverwrites.push({
             id: cfg.inactiveRoleId,
-            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages],
+            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+            deny: [PermissionFlagsBits.SendMessages],
           });
         }
         const channel = await interaction.guild.channels.create({
@@ -1084,26 +986,27 @@ client.on('interactionCreate', async (interaction) => {
         saveActivityConfig(activityConfig);
         await interaction.update(buildActivityChannelsMenuMessage(guildId));
         if (!cfg.inactiveRoleId) {
-          await interaction.followUp({
-            content:
-              "⚠️ Created #re-activate, but you haven't set your Inactive role yet — set it in the Roles page, then re-run this so I can grant it access to this channel.",
-            ephemeral: true,
-          });
+          await interaction.followUp({ content: "⚠️ Created #re-activate, but you haven't set your Inactive role yet — set it in the Roles page.", ephemeral: true });
         }
       } catch (err) {
-        console.error('Failed to create reactivation channel:', err.message);
         await interaction.reply({ content: `❌ Couldn't create that channel — make sure I have the **Manage Channels** permission. (${err.message})`, ephemeral: true });
+      }
+      return;
+    }
+    if (id === 'setup:activity:sync-perms') {
+      try {
+        await enforceQuarantinePermissions(interaction.guild);
+        await interaction.reply({ content: '✅ Permissions successfully synced across all channels for the Inactive role.', ephemeral: true });
+      } catch (err) {
+        await interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
       }
       return;
     }
   } catch (err) {
     console.error('Error handling /setup interaction:', err);
     try {
-      if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({ content: 'Something went wrong — check the terminal for details.', ephemeral: true });
-      } else {
-        await interaction.reply({ content: 'Something went wrong — check the terminal for details.', ephemeral: true });
-      }
+      if (interaction.deferred || interaction.replied) await interaction.followUp({ content: 'Something went wrong — check the terminal for details.', ephemeral: true });
+      else await interaction.reply({ content: 'Something went wrong — check the terminal for details.', ephemeral: true });
     } catch (followUpErr) {
       console.error('Could not send setup error response:', followUpErr.message);
     }
@@ -1111,31 +1014,18 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ============================================================
-// /channel-index config (unrelated to the camera policy above)
+// /channel-index config 
 // ============================================================
 
-// ---- Channel-index config: per-guild, editable via the dashboard ----
-// Used to be hardcoded constants (single-guild only). Now stored in
-// channel-index-config.json, same pattern as camera-config.json /
-// activity-config.json, and seeded once from the original hardcoded values
-// below so xXOnlineStatusXx's existing exclusions aren't lost.
 const CHANNEL_INDEX_CONFIG_FILE = dataPath('channel-index-config.json');
 
-const LEGACY_SEED_EXCLUDED_CATEGORY_IDS = [
-  '1517124026756235294', // ✦ ₊ ˚ xX☆ѕтαƒƒ ѕтuƒƒ☆Xx ˚ ₊ ✦
-  '1494265392338702377',
-  '1522368511123525754',
-  '1522167743237984336',
-];
+const LEGACY_SEED_EXCLUDED_CATEGORY_IDS = ['1517124026756235294', '1494265392338702377', '1522368511123525754', '1522167743237984336'];
 const LEGACY_SEED_EXCLUDED_CHANNEL_IDS = ['1533592609623376095', '1521265292070752286'];
 const LEGACY_SEED_EXCLUDED_NAME_KEYWORDS = ['ticket'];
 
 function loadChannelIndexConfig() {
-  try {
-    return JSON.parse(fs.readFileSync(CHANNEL_INDEX_CONFIG_FILE, 'utf-8'));
-  } catch {
-    return {};
-  }
+  try { return JSON.parse(fs.readFileSync(CHANNEL_INDEX_CONFIG_FILE, 'utf-8')); } 
+  catch { return {}; }
 }
 
 function saveChannelIndexConfig(config) {
@@ -1152,8 +1042,6 @@ let channelIndexConfig = loadChannelIndexConfig();
 
 function ensureChannelIndexGuildConfig(guildId) {
   if (!channelIndexConfig[guildId]) {
-    // One-time seed: only the original guild inherits the old hardcoded
-    // exclusions; every other/new guild starts with a clean slate.
     const isOriginalGuild = guildId === GUILD_ID;
     channelIndexConfig[guildId] = {
       excludedCategoryIds: isOriginalGuild ? [...LEGACY_SEED_EXCLUDED_CATEGORY_IDS] : [],
@@ -1165,7 +1053,6 @@ function ensureChannelIndexGuildConfig(guildId) {
   return channelIndexConfig[guildId];
 }
 
-// Human-readable names for Discord's channel type numbers
 const CHANNEL_TYPE_NAMES = {
   [ChannelType.GuildText]: 'text',
   [ChannelType.GuildVoice]: 'voice',
@@ -1178,187 +1065,37 @@ const CHANNEL_TYPE_NAMES = {
 
 // ---- Slash command definitions ----
 const commands = [
-  new SlashCommandBuilder()
-    .setName('setup')
-    .setDescription('Open the G33KY Bot configuration menu (Camera Policy, Activity Tracker, etc.)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-  new SlashCommandBuilder()
-    .setName('channel-index')
-    .setDescription('Post a formatted index of all channels in this server')
-    .addStringOption((opt) =>
-      opt
-        .setName('category')
-        .setDescription('Only list channels in this category (optional)')
-        .setRequired(false)
-    ),
-  new SlashCommandBuilder()
-    .setName('export-channels')
-    .setDescription('Export all channels to a channels.json file (posted here as a file)'),
-  new SlashCommandBuilder()
-    .setName('userinfo')
-    .setDescription('Show whatever profile info is available for a user, even if they left the server')
-    .addUserOption((opt) =>
-      opt
-        .setName('user')
-        .setDescription('The user to look up (pick from list or paste their ID)')
-        .setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName('camera-policy')
-    .setDescription('Turn the cameras-on voice channel policy on or off')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addStringOption((opt) =>
-      opt
-        .setName('state')
-        .setDescription('Turn the policy on or off')
-        .setRequired(true)
-        .addChoices({ name: 'On', value: 'on' }, { name: 'Off', value: 'off' })
-    ),
-  new SlashCommandBuilder()
-    .setName('camera-status')
-    .setDescription('View the full current camera policy configuration for this server')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-  new SlashCommandBuilder()
-    .setName('camera-monitor')
-    .setDescription('Manage which voice channels enforce the cameras-on policy in this server')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addSubcommand((sub) =>
-      sub
-        .setName('add')
-        .setDescription('Start monitoring a voice channel')
-        .addChannelOption((opt) => opt.setName('channel').setDescription('The voice channel to monitor').setRequired(true))
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('remove')
-        .setDescription('Stop monitoring a voice channel')
-        .addChannelOption((opt) => opt.setName('channel').setDescription('The voice channel to stop monitoring').setRequired(true))
-    )
-    .addSubcommand((sub) => sub.setName('list').setDescription('List all monitored voice channels in this server')),
-  new SlashCommandBuilder()
-    .setName('camera-exempt-role')
-    .setDescription('Manage which roles are exempt from the cameras-on policy in this server')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addSubcommand((sub) =>
-      sub
-        .setName('add')
-        .setDescription('Exempt a role from the camera policy')
-        .addRoleOption((opt) => opt.setName('role').setDescription('The role to exempt').setRequired(true))
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('remove')
-        .setDescription("Remove a role's exemption")
-        .addRoleOption((opt) => opt.setName('role').setDescription('The role to un-exempt').setRequired(true))
-    )
-    .addSubcommand((sub) => sub.setName('list').setDescription('List all exempt roles in this server')),
-  new SlashCommandBuilder()
-    .setName('camera-timing')
-    .setDescription('Configure camera policy timing for this server')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addSubcommand((sub) =>
-      sub
-        .setName('set')
-        .setDescription('Set the grace period and warning period')
-        .addIntegerOption((opt) =>
-          opt
-            .setName('grace_minutes')
-            .setDescription('Silent period before the first reminder (minutes)')
-            .setRequired(true)
-            .setMinValue(0)
-            .setMaxValue(60)
-        )
-        .addIntegerOption((opt) =>
-          opt
-            .setName('warning_minutes')
-            .setDescription('Time after the reminder before removal (minutes)')
-            .setRequired(true)
-            .setMinValue(1)
-            .setMaxValue(60)
-        )
-    )
-    .addSubcommand((sub) => sub.setName('view').setDescription('View current timing settings')),
-  new SlashCommandBuilder()
-    .setName('camera-announcement')
-    .setDescription('Set a link to your camera policy announcement, included in reminders')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addSubcommand((sub) =>
-      sub
-        .setName('set')
-        .setDescription('Set the announcement link')
-        .addStringOption((opt) => opt.setName('url').setDescription('Link to your policy announcement post').setRequired(true))
-    )
-    .addSubcommand((sub) => sub.setName('clear').setDescription('Remove the announcement link'))
-    .addSubcommand((sub) => sub.setName('view').setDescription('View the current announcement link')),
-  new SlashCommandBuilder()
-    .setName('activity-tracker')
-    .setDescription('Configure automatic active/inactive member tracking')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+  new SlashCommandBuilder().setName('setup').setDescription('Open the G33KY Bot configuration menu (Camera Policy, Activity Tracker, etc.)').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder().setName('channel-index').setDescription('Post a formatted index of all channels in this server').addStringOption((opt) => opt.setName('category').setDescription('Only list channels in this category (optional)').setRequired(false)),
+  new SlashCommandBuilder().setName('export-channels').setDescription('Export all channels to a channels.json file (posted here as a file)'),
+  new SlashCommandBuilder().setName('userinfo').setDescription('Show whatever profile info is available for a user, even if they left the server').addUserOption((opt) => opt.setName('user').setDescription('The user to look up (pick from list or paste their ID)').setRequired(true)),
+  new SlashCommandBuilder().setName('camera-policy').setDescription('Turn the cameras-on voice channel policy on or off').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).addStringOption((opt) => opt.setName('state').setDescription('Turn the policy on or off').setRequired(true).addChoices({ name: 'On', value: 'on' }, { name: 'Off', value: 'off' })),
+  new SlashCommandBuilder().setName('camera-status').setDescription('View the full current camera policy configuration for this server').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder().setName('camera-monitor').setDescription('Manage which voice channels enforce the cameras-on policy in this server').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).addSubcommand((sub) => sub.setName('add').setDescription('Start monitoring a voice channel').addChannelOption((opt) => opt.setName('channel').setDescription('The voice channel to monitor').setRequired(true))).addSubcommand((sub) => sub.setName('remove').setDescription('Stop monitoring a voice channel').addChannelOption((opt) => opt.setName('channel').setDescription('The voice channel to stop monitoring').setRequired(true))).addSubcommand((sub) => sub.setName('list').setDescription('List all monitored voice channels in this server')),
+  new SlashCommandBuilder().setName('camera-exempt-role').setDescription('Manage which roles are exempt from the cameras-on policy in this server').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).addSubcommand((sub) => sub.setName('add').setDescription('Exempt a role from the camera policy').addRoleOption((opt) => opt.setName('role').setDescription('The role to exempt').setRequired(true))).addSubcommand((sub) => sub.setName('remove').setDescription("Remove a role's exemption").addRoleOption((opt) => opt.setName('role').setDescription('The role to un-exempt').setRequired(true))).addSubcommand((sub) => sub.setName('list').setDescription('List all exempt roles in this server')),
+  new SlashCommandBuilder().setName('camera-timing').setDescription('Configure camera policy timing for this server').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).addSubcommand((sub) => sub.setName('set').setDescription('Set the grace period and warning period').addIntegerOption((opt) => opt.setName('grace_minutes').setDescription('Silent period before the first reminder (minutes)').setRequired(true).setMinValue(0).setMaxValue(60)).addIntegerOption((opt) => opt.setName('warning_minutes').setDescription('Time after the reminder before removal (minutes)').setRequired(true).setMinValue(1).setMaxValue(60))).addSubcommand((sub) => sub.setName('view').setDescription('View current timing settings')),
+  new SlashCommandBuilder().setName('camera-announcement').setDescription('Set a link to your camera policy announcement, included in reminders').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).addSubcommand((sub) => sub.setName('set').setDescription('Set the announcement link').addStringOption((opt) => opt.setName('url').setDescription('Link to your policy announcement post').setRequired(true))).addSubcommand((sub) => sub.setName('clear').setDescription('Remove the announcement link')).addSubcommand((sub) => sub.setName('view').setDescription('View the current announcement link')),
+  new SlashCommandBuilder().setName('activity-tracker').setDescription('Configure automatic active/inactive member tracking').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addSubcommand((sub) => sub.setName('enable').setDescription('Turn on activity tracking for this server'))
     .addSubcommand((sub) => sub.setName('disable').setDescription('Turn off activity tracking for this server'))
-    .addSubcommand((sub) =>
-      sub
-        .setName('set-roles')
-        .setDescription('Set the Active and Inactive roles')
-        .addRoleOption((opt) => opt.setName('active').setDescription('Role for active members').setRequired(true))
-        .addRoleOption((opt) => opt.setName('inactive').setDescription('Role for inactive members').setRequired(true))
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('set-threshold')
-        .setDescription('Days of inactivity before someone is marked inactive (default 30)')
-        .addIntegerOption((opt) => opt.setName('days').setDescription('Number of days').setRequired(true).setMinValue(1))
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('set-retention')
-        .setDescription('Days before raw activity timestamps are permanently deleted (default 90)')
-        .addIntegerOption((opt) => opt.setName('days').setDescription('Number of days').setRequired(true).setMinValue(1))
-    )
+    .addSubcommand((sub) => sub.setName('set-roles').setDescription('Set the Active and Inactive roles').addRoleOption((opt) => opt.setName('active').setDescription('Role for active members').setRequired(true)).addRoleOption((opt) => opt.setName('inactive').setDescription('Role for inactive members').setRequired(true)))
+    .addSubcommand((sub) => sub.setName('set-threshold').setDescription('Days of inactivity before someone is marked inactive (default 30)').addIntegerOption((opt) => opt.setName('days').setDescription('Number of days').setRequired(true).setMinValue(1)))
+    .addSubcommand((sub) => sub.setName('set-retention').setDescription('Days before raw activity timestamps are permanently deleted (default 90)').addIntegerOption((opt) => opt.setName('days').setDescription('Number of days').setRequired(true).setMinValue(1)))
     .addSubcommand((sub) => sub.setName('purge-now').setDescription('Manually run the data-retention cleanup right now'))
-    .addSubcommand((sub) =>
-      sub
-        .setName('set-quarantine-channel')
-        .setDescription('The channel inactive members can still see, to reactivate themselves')
-        .addChannelOption((opt) => opt.setName('channel').setDescription('Channel').setRequired(true))
-    )
-    .addSubcommandGroup((group) =>
-      group
-        .setName('exempt-role')
-        .setDescription('Roles skipped by activity tracking entirely (e.g. staff/bots)')
-        .addSubcommand((sub) =>
-          sub.setName('add').setDescription('Exempt a role').addRoleOption((opt) => opt.setName('role').setDescription('Role').setRequired(true))
-        )
-        .addSubcommand((sub) =>
-          sub
-            .setName('remove')
-            .setDescription('Remove an exemption')
-            .addRoleOption((opt) => opt.setName('role').setDescription('Role').setRequired(true))
-        )
-        .addSubcommand((sub) => sub.setName('list').setDescription('List exempt roles'))
-    )
+    .addSubcommand((sub) => sub.setName('set-quarantine-channel').setDescription('The channel inactive members can still see, to reactivate themselves').addChannelOption((opt) => opt.setName('channel').setDescription('Channel').setRequired(true)))
+    .addSubcommandGroup((group) => group.setName('exempt-role').setDescription('Roles skipped by activity tracking entirely (e.g. staff/bots)').addSubcommand((sub) => sub.setName('add').setDescription('Exempt a role').addRoleOption((opt) => opt.setName('role').setDescription('Role').setRequired(true))).addSubcommand((sub) => sub.setName('remove').setDescription('Remove an exemption').addRoleOption((opt) => opt.setName('role').setDescription('Role').setRequired(true))).addSubcommand((sub) => sub.setName('list').setDescription('List exempt roles')))
     .addSubcommand((sub) => sub.setName('post-button').setDescription('Post the reactivation button in the quarantine channel'))
+    .addSubcommand((sub) => sub.setName('sync-permissions').setDescription('Applies strict Inactive role channel permissions to all channels across server'))
     .addSubcommand((sub) => sub.setName('status').setDescription('View current activity tracker configuration'))
-    .addSubcommand((sub) =>
-      sub
-        .setName('check')
-        .setDescription("Manually check one member's activity status")
-        .addUserOption((opt) => opt.setName('user').setDescription('Member to check').setRequired(true))
-    ),
+    .addSubcommand((sub) => sub.setName('check').setDescription("Manually check one member's activity status").addUserOption((opt) => opt.setName('user').setDescription('Member to check').setRequired(true))),
 ].map((cmd) => cmd.toJSON());
 
-// ---- Register slash commands with Discord (GLOBAL = works in every server
-// the bot is in, not just this one — takes up to ~1 hour to first propagate
-// after a change, unlike guild-scoped registration which was instant) ----
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
-  await rest.put(Routes.applicationCommands(client.user.id), {
-    body: commands,
-  });
-  console.log('Slash commands registered globally (may take up to ~1hr to appear on a first-time change).');
+  await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+  console.log('Slash commands registered globally.');
 }
 
-// ---- Build the channel list data ----
 function getChannelData(guild, categoryFilter = null) {
   const channels = guild.channels.cache
     .filter((ch) => ch.type !== ChannelType.GuildCategory)
@@ -1374,14 +1111,13 @@ function getChannelData(guild, categoryFilter = null) {
       category: ch.parent ? ch.parent.name : null,
       categoryId: ch.parentId || null,
       link: `https://discord.com/channels/${guild.id}/${ch.id}`,
-      topic: ch.topic || null, // channel's own "topic" description, if set
+      topic: ch.topic || null,
     }));
   return channels;
 }
 
 const CHANNELS_FILE = dataPath('channels.json');
 
-// ---- Export to local channels.json ----
 function exportToFile(guild) {
   const data = getChannelData(guild);
   fs.writeFileSync(CHANNELS_FILE, JSON.stringify(data, null, 2));
@@ -1389,41 +1125,24 @@ function exportToFile(guild) {
   return data;
 }
 
-// ---- descriptions.json: hand-maintained channel descriptions ----
-// Keyed by guild ID, then by channel ID (not name) so two channels that
-// happen to share a name in different categories — or across different
-// servers running this bot — never collide. Each entry also stores the
-// channel's current name so the file stays readable when you're editing it
-// by hand — you can see at a glance which ID belongs to which channel.
 const DESCRIPTIONS_FILE = dataPath('descriptions.json');
 
 function ensureDescriptionsFile(guild) {
   const all = loadAllDescriptions();
-  if (all[guild.id]) return; // never overwrite existing entries for this guild
-
+  if (all[guild.id]) return;
   const data = getChannelData(guild);
   const template = {};
-  for (const ch of data) {
-    template[ch.id] = { name: ch.name, description: '' };
-  }
+  for (const ch of data) template[ch.id] = { name: ch.name, description: '' };
   all[guild.id] = template;
   saveAllDescriptions(all);
-  console.log(`Created descriptions for guild ${guild.id} in ${DESCRIPTIONS_FILE} — fill in the "description" fields whenever you're ready.`);
 }
 
-// Loads the whole file and migrates it once if it's still in the old flat
-// (single-guild, not guild-keyed) format — wraps the existing entries under
-// GUILD_ID so nothing already filled in gets lost.
 function loadAllDescriptions() {
   let raw;
-  try {
-    raw = JSON.parse(fs.readFileSync(DESCRIPTIONS_FILE, 'utf-8'));
-  } catch {
-    return {};
-  }
+  try { raw = JSON.parse(fs.readFileSync(DESCRIPTIONS_FILE, 'utf-8')); } 
+  catch { return {}; }
   const looksLegacyFlat = Object.values(raw).some((v) => v && typeof v === 'object' && 'name' in v && 'description' in v);
   if (looksLegacyFlat) {
-    console.log('Migrating descriptions.json from the old flat format to per-guild format...');
     const migrated = { [GUILD_ID]: raw };
     saveAllDescriptions(migrated);
     return migrated;
@@ -1449,63 +1168,31 @@ client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await registerCommands();
   seedCameraConfigIfNeeded();
-
-  // Also do a one-time export to file on startup, so you get channels.json
-  // immediately without needing to run a slash command first.
   const guild = await client.guilds.fetch(GUILD_ID);
   exportToFile(guild);
   ensureDescriptionsFile(guild);
-
-  // Activity tracker: reconcile who's currently connected to voice FIRST
-  // (fixes the bug where a redeploy mid-call erases someone's voice
-  // credit), then sync roles shortly after (let the member cache warm
-  // up), then every 6 hours after that.
   setTimeout(reconcileConnectedVoiceMembers, 15 * 1000);
   setTimeout(syncAllActivityGuilds, 30 * 1000);
   setInterval(syncAllActivityGuilds, 6 * 60 * 60 * 1000);
-
-  // Activity data retention: purge stale raw timestamps once a day. Runs a
-  // couple minutes after the first role sync so pruning never races with
-  // startup role assignment.
   setTimeout(pruneActivityData, 2 * 60 * 1000);
   setInterval(pruneActivityData, 24 * 60 * 60 * 1000);
 });
 
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-
-  const receivedAt = Date.now();
-  const interactionAge = receivedAt - interaction.createdTimestamp;
-  console.log(`[timing] Interaction received. Age when handler started: ${interactionAge}ms`);
-
   try {
     if (interaction.commandName === 'export-channels') {
       await interaction.deferReply({ ephemeral: true });
       const data = exportToFile(interaction.guild);
-      await interaction.editReply({
-        content: `Exported ${data.length} channels.`,
-        files: [CHANNELS_FILE],
-      });
+      await interaction.editReply({ content: `Exported ${data.length} channels.`, files: [CHANNELS_FILE] });
     }
 
     if (interaction.commandName === 'userinfo') {
       await interaction.deferReply();
       const targetUser = interaction.options.getUser('user');
-
-      // force:true skips the cache so we get the FULL profile — banner,
-      // accent color, etc — not just the stripped-down version Discord
-      // sends over the gateway for users who aren't in the server.
       const fullUser = await client.users.fetch(targetUser.id, { force: true });
-
-      // Try to get guild-specific info (nickname, roles, join date).
-      // This will simply fail if the user isn't in the server — that's
-      // expected and fine, we just show less info in that case.
       let member = null;
-      try {
-        member = await interaction.guild.members.fetch(targetUser.id);
-      } catch {
-        member = null;
-      }
+      try { member = await interaction.guild.members.fetch(targetUser.id); } catch { member = null; }
 
       const embed = new EmbedBuilder()
         .setColor(member?.displayHexColor && member.displayHexColor !== '#000000' ? member.displayHexColor : 0x8a2be2)
@@ -1519,9 +1206,7 @@ client.on('interactionCreate', async (interaction) => {
         )
         .setTimestamp();
 
-      if (fullUser.banner) {
-        embed.setImage(fullUser.bannerURL({ size: 512 }));
-      }
+      if (fullUser.banner) embed.setImage(fullUser.bannerURL({ size: 512 }));
 
       if (member) {
         embed.addFields(
@@ -1529,48 +1214,21 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Nickname', value: member.nickname || '—', inline: true },
           { name: 'Joined Server', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>`, inline: false }
         );
-        const roles = member.roles.cache
-          .filter((r) => r.id !== interaction.guild.id) // exclude @everyone
-          .map((r) => r.name);
-        if (roles.length) {
-          embed.addFields({ name: `Roles (${roles.length})`, value: roles.join(', ').slice(0, 1024) });
-        }
+        const roles = member.roles.cache.filter((r) => r.id !== interaction.guild.id).map((r) => r.name);
+        if (roles.length) embed.addFields({ name: `Roles (${roles.length})`, value: roles.join(', ').slice(0, 1024) });
       } else {
         embed.addFields({ name: 'In This Server', value: 'No — showing global profile only', inline: true });
       }
-
       await interaction.editReply({ embeds: [embed] });
     }
 
     if (interaction.commandName === 'camera-policy') {
-      const desiredState = interaction.options.getString('state'); // 'on' or 'off'
+      const desiredState = interaction.options.getString('state');
       const enabled = desiredState === 'on';
       const saved = setCameraPolicyEnabled(interaction.guildId, enabled);
-
-      if (!enabled) {
-        // Clear any warnings currently in flight FOR THIS SERVER ONLY, so
-        // nobody gets moved out after the policy's been switched off here —
-        // doesn't touch other servers' active warnings
-        for (const [key, info] of warnedUsers.entries()) {
-          if (key.startsWith(`${interaction.guildId}:`)) {
-            if (info.graceTimeoutId) clearTimeout(info.graceTimeoutId);
-            if (info.warnTimeoutId) clearTimeout(info.warnTimeoutId);
-            warnedUsers.delete(key);
-          }
-        }
-      }
-
-      const saveWarning = saved
-        ? ''
-        : "\n⚠️ **This didn't save to disk** — it'll work for now, but will revert if the bot restarts. Check Railway logs for a DATA_DIR write error.";
-
-      await interaction.reply({
-        content:
-          (enabled
-            ? '📷 Cameras-on policy is now **ON** — camera required in monitored voice channels.'
-            : '📴 Cameras-on policy is now **OFF** — no camera enforcement until turned back on.') + saveWarning,
-        ephemeral: false,
-      });
+      if (!enabled) clearAllCameraWarningsForGuild(interaction.guildId);
+      const saveWarning = saved ? '' : "\n⚠️ **This didn't save to disk**.";
+      await interaction.reply({ content: (enabled ? '📷 Cameras-on policy is now **ON**.' : '📴 Cameras-on policy is now **OFF**.') + saveWarning, ephemeral: false });
     }
 
     if (interaction.commandName === 'camera-status') {
@@ -1582,14 +1240,8 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Enabled', value: cfg.enabled ? 'Yes' : 'No', inline: true },
           { name: 'Grace period', value: `${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES} minute(s)`, inline: true },
           { name: 'Warning period', value: `${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES} minute(s)`, inline: true },
-          {
-            name: `Monitored channels (${cfg.monitoredChannels.length})`,
-            value: cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'None',
-          },
-          {
-            name: `Exempt roles (${cfg.exemptRoles.length})`,
-            value: cfg.exemptRoles.length ? cfg.exemptRoles.map((id) => `<@&${id}>`).join(', ') : 'None',
-          },
+          { name: `Monitored channels (${cfg.monitoredChannels.length})`, value: cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'None' },
+          { name: `Exempt roles (${cfg.exemptRoles.length})`, value: cfg.exemptRoles.length ? cfg.exemptRoles.map((id) => `<@&${id}>`).join(', ') : 'None' },
           { name: 'Announcement link', value: cfg.announcementUrl ? cfg.announcementUrl : 'Not set' }
         );
       await interaction.reply({ embeds: [embed], ephemeral: true });
@@ -1598,7 +1250,6 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.commandName === 'camera-monitor') {
       const sub = interaction.options.getSubcommand();
       const guildConfig = ensureGuildConfig(interaction.guildId);
-
       if (sub === 'add') {
         const channel = interaction.options.getChannel('channel');
         if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildStageVoice) {
@@ -1620,73 +1271,55 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply(`✅ Stopped monitoring **#${channel.name}**.`);
         }
       } else if (sub === 'list') {
-        if (guildConfig.monitoredChannels.length === 0) {
-          await interaction.reply({ content: 'No voice channels are currently being monitored in this server.', ephemeral: true });
-        } else {
-          const list = guildConfig.monitoredChannels.map((id) => `<#${id}>`).join('\n');
-          await interaction.reply({ content: `**Monitored voice channels:**\n${list}`, ephemeral: true });
-        }
+        if (guildConfig.monitoredChannels.length === 0) await interaction.reply({ content: 'No voice channels are currently being monitored in this server.', ephemeral: true });
+        else await interaction.reply({ content: `**Monitored voice channels:**\n${guildConfig.monitoredChannels.map((id) => `<#${id}>`).join('\n')}`, ephemeral: true });
       }
     }
 
     if (interaction.commandName === 'camera-exempt-role') {
       const sub = interaction.options.getSubcommand();
       const guildConfig = ensureGuildConfig(interaction.guildId);
-
       if (sub === 'add') {
         const role = interaction.options.getRole('role');
-        if (guildConfig.exemptRoles.includes(role.id)) {
-          await interaction.reply({ content: `**${role.name}** is already exempt.`, ephemeral: true });
-        } else {
+        if (guildConfig.exemptRoles.includes(role.id)) await interaction.reply({ content: `**${role.name}** is already exempt.`, ephemeral: true });
+        else {
           guildConfig.exemptRoles.push(role.id);
           saveCameraConfig(cameraConfig);
           await interaction.reply(`✅ **${role.name}** is now exempt from the cameras-on policy.`);
         }
       } else if (sub === 'remove') {
         const role = interaction.options.getRole('role');
-        if (!guildConfig.exemptRoles.includes(role.id)) {
-          await interaction.reply({ content: `**${role.name}** wasn't exempt.`, ephemeral: true });
-        } else {
+        if (!guildConfig.exemptRoles.includes(role.id)) await interaction.reply({ content: `**${role.name}** wasn't exempt.`, ephemeral: true });
+        else {
           guildConfig.exemptRoles = guildConfig.exemptRoles.filter((id) => id !== role.id);
           saveCameraConfig(cameraConfig);
           await interaction.reply(`✅ **${role.name}** is no longer exempt.`);
         }
       } else if (sub === 'list') {
-        if (guildConfig.exemptRoles.length === 0) {
-          await interaction.reply({ content: 'No roles are currently exempt in this server.', ephemeral: true });
-        } else {
-          const list = guildConfig.exemptRoles.map((id) => `<@&${id}>`).join('\n');
-          await interaction.reply({ content: `**Exempt roles:**\n${list}`, ephemeral: true });
-        }
+        if (guildConfig.exemptRoles.length === 0) await interaction.reply({ content: 'No roles are currently exempt in this server.', ephemeral: true });
+        else await interaction.reply({ content: `**Exempt roles:**\n${guildConfig.exemptRoles.map((id) => `<@&${id}>`).join('\n')}`, ephemeral: true });
       }
     }
 
     if (interaction.commandName === 'camera-timing') {
       const sub = interaction.options.getSubcommand();
       const guildConfig = ensureGuildConfig(interaction.guildId);
-
       if (sub === 'set') {
         const grace = interaction.options.getInteger('grace_minutes');
         const warning = interaction.options.getInteger('warning_minutes');
         guildConfig.graceMinutes = grace;
         guildConfig.warningMinutes = warning;
         saveCameraConfig(cameraConfig);
-        await interaction.reply(
-          `✅ Updated timing: **${grace} minute(s)** silent grace period, then **${warning} minute(s)** after the reminder before removal (total **${grace + warning} minute(s)**).`
-        );
+        await interaction.reply(`✅ Updated timing: **${grace} minute(s)** silent grace period, then **${warning} minute(s)** after the reminder before removal.`);
       } else if (sub === 'view') {
         const { graceMinutes, warningMinutes } = getTiming(interaction.guildId);
-        await interaction.reply({
-          content: `**Grace period:** ${graceMinutes} minute(s)\n**Warning period:** ${warningMinutes} minute(s)\n**Total time before removal:** ${graceMinutes + warningMinutes} minute(s)`,
-          ephemeral: true,
-        });
+        await interaction.reply({ content: `**Grace period:** ${graceMinutes} minute(s)\n**Warning period:** ${warningMinutes} minute(s)\n**Total time before removal:** ${graceMinutes + warningMinutes} minute(s)`, ephemeral: true });
       }
     }
 
     if (interaction.commandName === 'camera-announcement') {
       const sub = interaction.options.getSubcommand();
       const guildConfig = ensureGuildConfig(interaction.guildId);
-
       if (sub === 'set') {
         const url = interaction.options.getString('url');
         guildConfig.announcementUrl = url;
@@ -1697,10 +1330,7 @@ client.on('interactionCreate', async (interaction) => {
         saveCameraConfig(cameraConfig);
         await interaction.reply(`✅ Announcement link cleared.`);
       } else if (sub === 'view') {
-        await interaction.reply({
-          content: guildConfig.announcementUrl ? `Current announcement link:\n${guildConfig.announcementUrl}` : 'No announcement link is set for this server.',
-          ephemeral: true,
-        });
+        await interaction.reply({ content: guildConfig.announcementUrl ? `Current announcement link:\n${guildConfig.announcementUrl}` : 'No announcement link is set for this server.', ephemeral: true });
       }
     }
 
@@ -1712,9 +1342,8 @@ client.on('interactionCreate', async (interaction) => {
       if (group === 'exempt-role') {
         if (sub === 'add') {
           const role = interaction.options.getRole('role');
-          if (guildConfig.exemptRoleIds.includes(role.id)) {
-            await interaction.reply({ content: `**${role.name}** is already exempt.`, ephemeral: true });
-          } else {
+          if (guildConfig.exemptRoleIds.includes(role.id)) await interaction.reply({ content: `**${role.name}** is already exempt.`, ephemeral: true });
+          else {
             guildConfig.exemptRoleIds.push(role.id);
             saveActivityConfig(activityConfig);
             await interaction.reply(`✅ **${role.name}** is now exempt from activity tracking.`);
@@ -1732,13 +1361,12 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (sub === 'enable') {
-        if (!guildConfig.activeRoleId || !guildConfig.inactiveRoleId) {
-          await interaction.reply({ content: '❌ Set your roles first with `/activity-tracker set-roles`.', ephemeral: true });
-        } else {
+        if (!guildConfig.activeRoleId || !guildConfig.inactiveRoleId) await interaction.reply({ content: '❌ Set your roles first with `/activity-tracker set-roles`.', ephemeral: true });
+        else {
           guildConfig.enabled = true;
           saveActivityConfig(activityConfig);
           await interaction.reply('✅ Activity tracking is now **ON**.');
-          syncActivityRoles(interaction.guild); // run an immediate sync
+          syncActivityRoles(interaction.guild);
         }
       } else if (sub === 'disable') {
         guildConfig.enabled = false;
@@ -1759,10 +1387,7 @@ client.on('interactionCreate', async (interaction) => {
       } else if (sub === 'set-retention') {
         const days = interaction.options.getInteger('days');
         if (days < guildConfig.thresholdDays) {
-          await interaction.reply({
-            content: `❌ Retention (${days} days) can't be shorter than your inactivity threshold (${guildConfig.thresholdDays} days) — that would delete activity records before they've even been used to decide Active/Inactive.`,
-            ephemeral: true,
-          });
+          await interaction.reply({ content: `❌ Retention (${days} days) can't be shorter than your inactivity threshold (${guildConfig.thresholdDays} days).`, ephemeral: true });
         } else {
           guildConfig.retentionDays = days;
           saveActivityConfig(activityConfig);
@@ -1770,25 +1395,27 @@ client.on('interactionCreate', async (interaction) => {
         }
       } else if (sub === 'purge-now') {
         const pruned = pruneActivityData(interaction.guildId);
-        await interaction.reply({
-          content: pruned > 0 ? `✅ Purged **${pruned}** stale activity record(s) for this server.` : '✅ Nothing to purge — no records here are past the retention window.',
-          ephemeral: true,
-        });
+        await interaction.reply({ content: pruned > 0 ? `✅ Purged **${pruned}** stale activity record(s) for this server.` : '✅ Nothing to purge.', ephemeral: true });
       } else if (sub === 'set-quarantine-channel') {
         const channel = interaction.options.getChannel('channel');
         guildConfig.quarantineChannelId = channel.id;
         saveActivityConfig(activityConfig);
-        await interaction.reply(
-          `✅ Quarantine/reactivation channel set to **#${channel.name}**. Don't forget to set that channel's permissions (see setup guide) and run \`/activity-tracker post-button\`.`
-        );
+        await interaction.reply(`✅ Quarantine/reactivation channel set to **#${channel.name}**.`);
       } else if (sub === 'post-button') {
-        if (!guildConfig.quarantineChannelId) {
-          await interaction.reply({ content: '❌ Set a quarantine channel first with `/activity-tracker set-quarantine-channel`.', ephemeral: true });
-        } else {
+        if (!guildConfig.quarantineChannelId) await interaction.reply({ content: '❌ Set a quarantine channel first with `/activity-tracker set-quarantine-channel`.', ephemeral: true });
+        else {
           const channel = await interaction.guild.channels.fetch(guildConfig.quarantineChannelId);
           const { embed, row } = buildReactivationEmbedAndRow();
           await channel.send({ embeds: [embed], components: [row] });
           await interaction.reply({ content: `✅ Button posted in **#${channel.name}**.`, ephemeral: true });
+        }
+      } else if (sub === 'sync-permissions') {
+        await interaction.deferReply({ ephemeral: true });
+        try {
+          const count = await enforceQuarantinePermissions(interaction.guild);
+          await interaction.editReply({ content: `✅ Permissions successfully synced across **${count}** channels for the Inactive role.` });
+        } catch (err) {
+          await interaction.editReply({ content: `❌ Error: ${err.message}` });
         }
       } else if (sub === 'status') {
         const storedRecordCount = Object.keys(activityData[interaction.guildId] || {}).length;
@@ -1801,19 +1428,9 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Retention', value: `${guildConfig.retentionDays ?? DEFAULT_RETENTION_DAYS} days`, inline: true },
             { name: 'Active role', value: guildConfig.activeRoleId ? `<@&${guildConfig.activeRoleId}>` : 'Not set', inline: true },
             { name: 'Inactive role', value: guildConfig.inactiveRoleId ? `<@&${guildConfig.inactiveRoleId}>` : 'Not set', inline: true },
-            {
-              name: 'Quarantine channel',
-              value: guildConfig.quarantineChannelId ? `<#${guildConfig.quarantineChannelId}>` : 'Not set',
-              inline: true,
-            },
-            {
-              name: 'Exempt roles',
-              value: guildConfig.exemptRoleIds.length ? guildConfig.exemptRoleIds.map((id) => `<@&${id}>`).join(', ') : 'None',
-            },
-            {
-              name: 'Records currently stored',
-              value: `${storedRecordCount} member(s) — automatically deleted after ${guildConfig.retentionDays ?? DEFAULT_RETENTION_DAYS} day(s) of inactivity`,
-            }
+            { name: 'Quarantine channel', value: guildConfig.quarantineChannelId ? `<#${guildConfig.quarantineChannelId}>` : 'Not set', inline: true },
+            { name: 'Exempt roles', value: guildConfig.exemptRoleIds.length ? guildConfig.exemptRoleIds.map((id) => `<@&${id}>`).join(', ') : 'None' },
+            { name: 'Records currently stored', value: `${storedRecordCount} member(s)` }
           );
         await interaction.reply({ embeds: [embed], ephemeral: true });
       } else if (sub === 'check') {
@@ -1825,12 +1442,7 @@ client.on('interactionCreate', async (interaction) => {
         const lastActive = Math.max(lastMessageAt, lastVoiceActiveAt, member.joinedTimestamp || 0);
         const daysSince = Math.floor((Date.now() - lastActive) / (24 * 60 * 60 * 1000));
         await interaction.reply({
-          content:
-            `**${user.tag}**\n` +
-            `Last message: ${lastMessageAt ? `<t:${Math.floor(lastMessageAt / 1000)}:R>` : 'never recorded'}\n` +
-            `Last voice activity: ${lastVoiceActiveAt ? `<t:${Math.floor(lastVoiceActiveAt / 1000)}:R>` : 'never recorded'}\n` +
-            `Effectively last active: ${daysSince} day(s) ago\n` +
-            `Currently: ${daysSince <= guildConfig.thresholdDays ? '🟢 Active' : '🔴 Inactive'}`,
+          content: `**${user.tag}**\nLast message: ${lastMessageAt ? `<t:${Math.floor(lastMessageAt / 1000)}:R>` : 'never recorded'}\nLast voice activity: ${lastVoiceActiveAt ? `<t:${Math.floor(lastVoiceActiveAt / 1000)}:R>` : 'never recorded'}\nEffectively last active: ${daysSince} day(s) ago\nCurrently: ${daysSince <= guildConfig.thresholdDays ? '🟢 Active' : '🔴 Inactive'}`,
           ephemeral: true,
         });
       }
@@ -1842,8 +1454,6 @@ client.on('interactionCreate', async (interaction) => {
       const data = getChannelData(interaction.guild, categoryFilter);
       const indexCfg = ensureChannelIndexGuildConfig(interaction.guildId);
 
-      // Group by category for a clean, readable post — skipping any
-      // categories/channels/keywords excluded via the dashboard or /setup.
       const byCategory = {};
       for (const ch of data) {
         if (ch.categoryId && indexCfg.excludedCategoryIds.includes(ch.categoryId)) continue;
@@ -1856,17 +1466,9 @@ client.on('interactionCreate', async (interaction) => {
         byCategory[key].push(ch);
       }
 
-      // Discord's 6000-character limit applies to the COMBINED total across
-      // all embeds within a single message (not per-embed). To sidestep that
-      // entirely, we send one embed per message — each message gets its own
-      // fresh 6000-char and 25-field budget, so there's no cross-embed math
-      // to get wrong. With 144+ channels this just means several messages
-      // posted back to back, which is fine for an index.
       const MAX_FIELDS_PER_EMBED = 25;
-      const MAX_CHARS_PER_EMBED = 5500; // buffer under Discord's 6000 limit
-
+      const MAX_CHARS_PER_EMBED = 5500;
       const descriptions = loadDescriptions(interaction.guildId);
-
       const categoryEntries = Object.entries(byCategory);
       const embeds = [];
       let current = null;
@@ -1893,8 +1495,7 @@ client.on('interactionCreate', async (interaction) => {
         const value = lines.join('\n').slice(0, 1024) || '—';
         const entryChars = category.length + value.length;
 
-        const needsNewEmbed = fieldCount >= MAX_FIELDS_PER_EMBED || charCount + entryChars > MAX_CHARS_PER_EMBED;
-        if (needsNewEmbed) {
+        if (fieldCount >= MAX_FIELDS_PER_EMBED || charCount + entryChars > MAX_CHARS_PER_EMBED) {
           embeds.push(current);
           current = startNewEmbed();
           fieldCount = 0;
@@ -1907,7 +1508,6 @@ client.on('interactionCreate', async (interaction) => {
       }
       embeds.push(current);
 
-      // Send first embed as the actual reply, the rest as separate follow-up messages
       await interaction.editReply({ embeds: [embeds[0]] });
       for (let i = 1; i < embeds.length; i++) {
         await interaction.followUp({ embeds: [embeds[i]] });
@@ -1915,18 +1515,10 @@ client.on('interactionCreate', async (interaction) => {
     }
   } catch (err) {
     console.error('Error handling interaction:', err);
-    // Try to let the user know something went wrong, without crashing the bot
     try {
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply('Something went wrong running that command — check the terminal for details.');
-      } else {
-        await interaction.reply({
-          content: 'Something went wrong running that command — check the terminal for details.',
-          ephemeral: true,
-        });
-      }
+      if (interaction.deferred || interaction.replied) await interaction.editReply('Something went wrong running that command — check the terminal for details.');
+      else await interaction.reply({ content: 'Something went wrong running that command — check the terminal for details.', ephemeral: true });
     } catch (followUpErr) {
-      // If we can't even respond (e.g. interaction expired), just log and move on
       console.error('Could not send error response to Discord:', followUpErr.message);
     }
   }
@@ -1935,20 +1527,8 @@ client.on('interactionCreate', async (interaction) => {
 // ============================================================
 // Cameras-On voice channel policy — enforcement
 // ============================================================
-// Two-stage, low-noise design:
-//   1. Camera goes off in a monitored channel -> a SILENT grace period
-//      starts (default 2 min). Nothing is sent yet — this absorbs brief
-//      flickers/reconnects without ever pinging anyone.
-//   2. If still off when the grace period ends -> ONE reminder is posted
-//      in the voice channel's own text chat (an @ping, not a DM), and a
-//      second timer starts (default 3 min).
-//   3. If still off when that timer ends -> they're disconnected from
-//      voice and a short follow-up message is posted.
-// Turning the camera on at any point cancels everything for that cycle.
-// Turning it off again later starts a completely fresh cycle (matches
-// "the timer will reset and you'll receive another reminder").
 
-const warnedUsers = new Map(); // "guildId:userId" -> { stage: 'grace'|'warned', graceTimeoutId?, warnTimeoutId?, channel }
+const warnedUsers = new Map(); 
 
 function warnKey(guildId, userId) {
   return `${guildId}:${userId}`;
@@ -1963,7 +1543,6 @@ async function handleCameraOff(member, channel) {
   const guildId = member.guild.id;
   const key = warnKey(guildId, member.id);
 
-  // Already mid-cycle (grace or warned) — don't restart it
   if (warnedUsers.has(key)) return;
 
   const { graceMinutes, warningMinutes } = getTiming(guildId);
@@ -1972,10 +1551,6 @@ async function handleCameraOff(member, channel) {
 
   const graceTimeoutId = setTimeout(async () => {
     try {
-      // Re-check here, not just at the moment the toggle command ran — this
-      // timer was scheduled possibly minutes ago, and the policy may have
-      // been turned off since then. Without this check, a timer that's
-      // already in-flight can fire and disconnect someone even after "off".
       if (!isCameraPolicyEnabled(guildId)) {
         warnedUsers.delete(key);
         return;
@@ -1995,8 +1570,6 @@ async function handleCameraOff(member, channel) {
 
       const warnTimeoutId = setTimeout(async () => {
         try {
-          // Same re-check — this timer can fire minutes after it was set,
-          // long after an admin may have turned the policy off.
           if (!isCameraPolicyEnabled(guildId)) {
             warnedUsers.delete(key);
             return;
@@ -2035,8 +1608,6 @@ async function clearWarning(guildId, userId, { confirm = true } = {}) {
   if (info.warnTimeoutId) clearTimeout(info.warnTimeoutId);
   warnedUsers.delete(key);
 
-  // Only post a confirmation if we'd actually sent a reminder — no need to
-  // say anything if they turned the camera on during the silent grace period
   if (confirm && info.stage === 'warned' && info.channel) {
     try {
       await info.channel.send(`<@${userId}> ✅ Thanks for turning your camera on!`);
@@ -2054,8 +1625,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const memberId = newState.member.id;
 
   if (!channelId || !getMonitoredChannels(guildId).includes(channelId)) {
-    // Left voice entirely, or moved to an unmonitored channel — clear
-    // silently (no "thanks!" message, since they're not even there anymore)
     if (!newState.channelId) {
       await clearWarning(guildId, memberId, { confirm: false });
     }
@@ -2067,8 +1636,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const cameraIsOn = newState.selfVideo;
   const key = warnKey(guildId, memberId);
 
-  // If they moved between two monitored channels while already mid-cycle,
-  // keep the reminder/removal messages pointed at their CURRENT channel
   if (warnedUsers.has(key)) {
     warnedUsers.get(key).channel = channel;
   }
@@ -2079,30 +1646,15 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     return;
   }
 
-  if (!cameraIsOn) {
-    await handleCameraOff(member, channel);
-  } else {
-    await clearWarning(guildId, memberId, { confirm: true });
-  }
+  if (!cameraIsOn) await handleCameraOff(member, channel);
+  else await clearWarning(guildId, memberId, { confirm: true });
 });
 
-// Prevent one bad interaction, network hiccup, or unexpected error from
-// crashing the whole bot process. It gets logged instead, and the bot stays online.
-client.on('error', (err) => {
-  console.error('Discord client error:', err);
-});
-
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled rejection (bot stays online):', err);
-});
+client.on('error', (err) => console.error('Discord client error:', err));
+process.on('unhandledRejection', (err) => console.error('Unhandled rejection (bot stays online):', err));
 
 // ============================================================
-// Web Dashboard — bundled into this same process, same as the Discord
-// bot. Single shared password (DASHBOARD_PASSWORD, set as a Railway
-// Variable) gates the whole thing — this is a personal admin tool, not a
-// per-server-admin login system. Every page reads/writes the exact same
-// config objects and functions the Discord side uses, so the dashboard
-// and /setup are always in sync.
+// Web Dashboard 
 // ============================================================
 const express = require('express');
 const session = require('express-session');
@@ -2112,16 +1664,12 @@ const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD;
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const PORT = process.env.PORT || 3000;
 
-if (!DASHBOARD_PASSWORD) {
-  console.warn('DASHBOARD_PASSWORD is not set — the dashboard will refuse all logins until you set it as a Railway Variable.');
-}
-if (!process.env.SESSION_SECRET) {
-  console.warn('SESSION_SECRET is not set — using a random secret generated at startup, so everyone gets logged out on every restart. Set SESSION_SECRET as a Railway Variable to avoid that.');
-}
+if (!DASHBOARD_PASSWORD) console.warn('DASHBOARD_PASSWORD is not set — the dashboard will refuse all logins until you set it as a Railway Variable.');
+if (!process.env.SESSION_SECRET) console.warn('SESSION_SECRET is not set — using a random secret generated at startup, so everyone gets logged out on every restart.');
 
 const app = express();
-app.set('trust proxy', 1); // Railway sits behind a proxy — needed for secure cookies to work
-app.use(express.urlencoded({ extended: true, limit: '3mb' })); // raised limit: the descriptions editor can post one field per channel
+app.set('trust proxy', 1);
+app.use(express.urlencoded({ extended: true, limit: '3mb' }));
 
 app.use(
   session({
@@ -2131,7 +1679,7 @@ app.use(
     cookie: {
       httpOnly: true,
       secure: !!process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     },
   })
 );
@@ -2148,8 +1696,6 @@ function requireAuth(req, res, next) {
   return res.redirect('/login');
 }
 
-// Express gives a bare string for one checked box, an array for 2+, and
-// undefined for zero — this normalizes all three to always be an array.
 function asArray(val) {
   if (val === undefined) return [];
   return Array.isArray(val) ? val : [val];
@@ -2167,7 +1713,6 @@ function resolveGuildId(req) {
   return first ? first.id : null;
 }
 
-// ---- Shared page shell: header nav + guild switcher + dark theme ----
 function renderLayout({ title, guildId, currentPath, body, flash }) {
   const guilds = [...client.guilds.cache.values()];
   const guildOptions = guilds
@@ -2261,7 +1806,6 @@ function renderLayout({ title, guildId, currentPath, body, flash }) {
 </html>`;
 }
 
-// ---- Auth routes (unprotected) ----
 app.get('/login', (req, res) => {
   if (req.session?.authenticated) return res.redirect('/');
   const error = req.query.error ? '<div class="flash" style="border-color:var(--red);">Incorrect password.</div>' : '';
@@ -2288,9 +1832,7 @@ app.get('/login', (req, res) => {
 });
 
 app.post('/login', (req, res) => {
-  if (!DASHBOARD_PASSWORD) {
-    return res.status(503).send('Dashboard password is not configured. Set DASHBOARD_PASSWORD as a Railway Variable, then redeploy.');
-  }
+  if (!DASHBOARD_PASSWORD) return res.status(503).send('Dashboard password is not configured.');
   const { password } = req.body;
   if (password && timingSafeStringEqual(password, DASHBOARD_PASSWORD)) {
     req.session.authenticated = true;
@@ -2299,30 +1841,17 @@ app.post('/login', (req, res) => {
   return res.redirect('/login?error=1');
 });
 
-app.get('/logout', (req, res) => {
-  req.session.destroy(() => res.redirect('/login'));
-});
-
-app.get('/health', (req, res) => res.status(200).send('ok')); // for Railway's healthcheck, unauthenticated on purpose
-
-app.use(requireAuth); // everything below this line requires a logged-in session
+app.get('/logout', (req, res) => req.session.destroy(() => res.redirect('/login')));
+app.get('/health', (req, res) => res.status(200).send('ok'));
+app.use(requireAuth); 
 
 // ---- Overview ----
 app.get('/', async (req, res) => {
   const guildId = resolveGuildId(req);
-  if (!guildId) {
-    return res.send(
-      renderLayout({
-        title: 'Overview',
-        guildId: null,
-        currentPath: '/',
-        body: `<div class="card"><p>No servers loaded yet — the bot may still be starting up. Refresh in a moment.</p></div>`,
-      })
-    );
-  }
+  if (!guildId) return res.send(renderLayout({ title: 'Overview', guildId: null, currentPath: '/', body: `<div class="card"><p>No servers loaded yet — the bot may still be starting up. Refresh in a moment.</p></div>` }));
 
   const guild = client.guilds.cache.get(guildId);
-  await guild.members.fetch().catch(() => {}); // best-effort, for accurate Active/Inactive counts
+  await guild.members.fetch().catch(() => {});
 
   const camCfg = ensureGuildConfig(guildId);
   const actCfg = ensureActivityGuildConfig(guildId);
@@ -2344,7 +1873,6 @@ app.get('/', async (req, res) => {
         <div class="stat"><div class="num">${totalChannels}</div><div class="label">Channels</div></div>
       </div>
     </div>
-
     <div class="card">
       <h3>📷 Camera Policy</h3>
       <p><span class="pill ${camCfg.enabled ? 'on' : 'off'}">${camCfg.enabled ? 'ENABLED' : 'DISABLED'}</span></p>
@@ -2355,7 +1883,6 @@ app.get('/', async (req, res) => {
       </div>
       <p style="margin-top:12px;"><a href="/camera?guild=${guildId}">Configure →</a></p>
     </div>
-
     <div class="card">
       <h3>📊 Activity Tracker</h3>
       <p><span class="pill ${actCfg.enabled ? 'on' : 'off'}">${actCfg.enabled ? 'ENABLED' : 'DISABLED'}</span></p>
@@ -2368,7 +1895,6 @@ app.get('/', async (req, res) => {
       </div>
       <p style="margin-top:12px;"><a href="/activity?guild=${guildId}">Configure →</a></p>
     </div>
-
     <div class="card">
       <h3># Channel Index</h3>
       <div class="stat-grid">
@@ -2393,12 +1919,8 @@ app.get('/camera', (req, res) => {
   const textChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement).values()].sort((a, b) => a.rawPosition - b.rawPosition);
   const roles = [...guild.roles.cache.filter((r) => r.id !== guild.id).values()].sort((a, b) => b.position - a.position);
 
-  const channelChecklist =
-    voiceChannels.map((c) => `<label class="check-item"><input type="checkbox" name="monitoredChannels" value="${c.id}" ${cfg.monitoredChannels.includes(c.id) ? 'checked' : ''}> #${escapeHtml(c.name)}</label>`).join('') ||
-    '<p class="muted">No voice channels found.</p>';
-  const roleChecklist =
-    roles.map((r) => `<label class="check-item"><input type="checkbox" name="exemptRoles" value="${r.id}" ${cfg.exemptRoles.includes(r.id) ? 'checked' : ''}> ${escapeHtml(r.name)}</label>`).join('') ||
-    '<p class="muted">No roles found.</p>';
+  const channelChecklist = voiceChannels.map((c) => `<label class="check-item"><input type="checkbox" name="monitoredChannels" value="${c.id}" ${cfg.monitoredChannels.includes(c.id) ? 'checked' : ''}> #${escapeHtml(c.name)}</label>`).join('') || '<p class="muted">No voice channels found.</p>';
+  const roleChecklist = roles.map((r) => `<label class="check-item"><input type="checkbox" name="exemptRoles" value="${r.id}" ${cfg.exemptRoles.includes(r.id) ? 'checked' : ''}> ${escapeHtml(r.name)}</label>`).join('') || '<p class="muted">No roles found.</p>';
   const announceOptions = textChannels.map((c) => `<option value="${c.id}" ${cfg.announcementChannelId === c.id ? 'selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
 
   const body = `
@@ -2411,7 +1933,6 @@ app.get('/camera', (req, res) => {
         <button class="${cfg.enabled ? 'danger' : ''}" type="submit">${cfg.enabled ? 'Disable' : 'Enable'}</button>
       </form>
     </div>
-
     <div class="card">
       <form method="POST" action="/camera/save">
         <input type="hidden" name="guild" value="${guildId}">
@@ -2427,32 +1948,17 @@ app.get('/camera', (req, res) => {
         <div class="btn-row"><button type="submit">Save Changes</button></div>
       </form>
     </div>
-
     <div class="card">
       <h3>Exempt role</h3>
       <p class="muted">Creates a new Discord role and adds it to the exempt list above.</p>
-      <form method="POST" action="/camera/create-exempt-role">
-        <input type="hidden" name="guild" value="${guildId}">
-        <button class="secondary" type="submit">Create Exempt Role</button>
-      </form>
+      <form method="POST" action="/camera/create-exempt-role"><input type="hidden" name="guild" value="${guildId}"><button class="secondary" type="submit">Create Exempt Role</button></form>
     </div>
-
     <div class="card">
       <h3>Post policy announcement</h3>
       <form method="POST" action="/camera/announce">
         <input type="hidden" name="guild" value="${guildId}">
-        <div class="row">
-          <div class="field" style="min-width:220px;">
-            <label>Channel</label>
-            <select name="channelId"><option value="">-- select a channel --</option>${announceOptions}</select>
-          </div>
-        </div>
-        <div class="field">
-          <label>Policy text</label>
-          <textarea name="text" rows="5" style="width:100%;">Cameras must be ON while in monitored voice channels.
-
-If your camera is off, you'll get a silent ${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES} minute grace period, then a reminder, then ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES} more minute(s) before you're moved out of the channel. Turning your camera back on at any point cancels the timer.</textarea>
-        </div>
+        <div class="row"><div class="field" style="min-width:220px;"><label>Channel</label><select name="channelId"><option value="">-- select a channel --</option>${announceOptions}</select></div></div>
+        <div class="field"><label>Policy text</label><textarea name="text" rows="5" style="width:100%;">Cameras must be ON while in monitored voice channels.\n\nIf your camera is off, you'll get a silent ${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES} minute grace period, then a reminder, then ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES} more minute(s) before you're moved out of the channel. Turning your camera back on at any point cancels the timer.</textarea></div>
         <div class="btn-row"><button type="submit">Post Announcement</button></div>
       </form>
     </div>
@@ -2501,9 +2007,7 @@ app.post('/camera/announce', async (req, res) => {
   const guild = client.guilds.cache.get(guildId);
   const cfg = ensureGuildConfig(guildId);
   const { channelId, text } = req.body;
-  if (!channelId || !text) {
-    return res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('Pick a channel and enter text first.')}`);
-  }
+  if (!channelId || !text) return res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('Pick a channel and enter text first.')}`);
   try {
     const channel = await guild.channels.fetch(channelId);
     const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('📷 Camera Policy').setDescription(text).setTimestamp();
@@ -2530,25 +2034,17 @@ app.get('/activity', (req, res) => {
   const allTrackableChannels = [...textChannels, ...voiceChannels];
 
   const roleOptions = (selectedId) => roles.map((r) => `<option value="${r.id}" ${r.id === selectedId ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
-  const exemptChecklist =
-    roles.map((r) => `<label class="check-item"><input type="checkbox" name="exemptRoles" value="${r.id}" ${cfg.exemptRoleIds.includes(r.id) ? 'checked' : ''}> ${escapeHtml(r.name)}</label>`).join('') ||
-    '<p class="muted">No roles found.</p>';
+  const exemptChecklist = roles.map((r) => `<label class="check-item"><input type="checkbox" name="exemptRoles" value="${r.id}" ${cfg.exemptRoleIds.includes(r.id) ? 'checked' : ''}> ${escapeHtml(r.name)}</label>`).join('') || '<p class="muted">No roles found.</p>';
   const quarantineOptions = textChannels.map((c) => `<option value="${c.id}" ${cfg.quarantineChannelId === c.id ? 'selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
-  const monitoredChecklist =
-    allTrackableChannels.map((c) => `<label class="check-item"><input type="checkbox" name="monitoredChannels" value="${c.id}" ${cfg.monitoredChannels.includes(c.id) ? 'checked' : ''}> #${escapeHtml(c.name)}</label>`).join('') ||
-    '<p class="muted">No channels found.</p>';
+  const monitoredChecklist = allTrackableChannels.map((c) => `<label class="check-item"><input type="checkbox" name="monitoredChannels" value="${c.id}" ${cfg.monitoredChannels.includes(c.id) ? 'checked' : ''}> #${escapeHtml(c.name)}</label>`).join('') || '<p class="muted">No channels found.</p>';
   const storedRecordCount = Object.keys(activityData[guildId] || {}).length;
 
   const body = `
     <div class="card">
       <h2>📊 Activity Tracker — ${escapeHtml(guild.name)}</h2>
       <p><span class="pill ${cfg.enabled ? 'on' : 'off'}">${cfg.enabled ? 'ENABLED' : 'DISABLED'}</span></p>
-      <form method="POST" action="/activity/toggle">
-        <input type="hidden" name="guild" value="${guildId}">
-        <button class="${cfg.enabled ? 'danger' : ''}" type="submit">${cfg.enabled ? 'Disable' : 'Enable'}</button>
-      </form>
+      <form method="POST" action="/activity/toggle"><input type="hidden" name="guild" value="${guildId}"><button class="${cfg.enabled ? 'danger' : ''}" type="submit">${cfg.enabled ? 'Disable' : 'Enable'}</button></form>
     </div>
-
     <div class="card">
       <form method="POST" action="/activity/save-roles">
         <input type="hidden" name="guild" value="${guildId}">
@@ -2567,7 +2063,6 @@ app.get('/activity', (req, res) => {
         <form method="POST" action="/activity/create-role"><input type="hidden" name="guild" value="${guildId}"><input type="hidden" name="type" value="exempt"><button class="secondary" type="submit">Create Exempt Role</button></form>
       </div>
     </div>
-
     <div class="card">
       <form method="POST" action="/activity/save-channels">
         <input type="hidden" name="guild" value="${guildId}">
@@ -2582,7 +2077,14 @@ app.get('/activity', (req, res) => {
         <form method="POST" action="/activity/post-button"><input type="hidden" name="guild" value="${guildId}"><button class="secondary" type="submit">Post Reactivation Button</button></form>
       </div>
     </div>
-
+    <div class="card">
+      <h3>🔒 Channel Permissions Sync</h3>
+      <p class="muted">Locks the Inactive role out of all channels (no view/no send) EXCEPT the Quarantine channel (view only). Run this when configuring your tracker for the first time.</p>
+      <form method="POST" action="/activity/sync-perms">
+        <input type="hidden" name="guild" value="${guildId}">
+        <button class="danger" type="submit">Sync Permissions Across Server</button>
+      </form>
+    </div>
     <div class="card">
       <form method="POST" action="/activity/save-timing">
         <input type="hidden" name="guild" value="${guildId}">
@@ -2594,14 +2096,10 @@ app.get('/activity', (req, res) => {
         <div class="btn-row"><button type="submit">Save</button></div>
       </form>
     </div>
-
     <div class="card">
       <h3>Data</h3>
       <p class="muted">${storedRecordCount} activity record(s) currently stored for this server.</p>
-      <form method="POST" action="/activity/purge-now">
-        <input type="hidden" name="guild" value="${guildId}">
-        <button class="secondary" type="submit">Purge Stale Records Now</button>
-      </form>
+      <form method="POST" action="/activity/purge-now"><input type="hidden" name="guild" value="${guildId}"><button class="secondary" type="submit">Purge Stale Records Now</button></form>
     </div>
   `;
   res.send(renderLayout({ title: 'Activity Tracker', guildId, currentPath: '/activity', body, flash: req.query.flash }));
@@ -2610,9 +2108,7 @@ app.get('/activity', (req, res) => {
 app.post('/activity/toggle', (req, res) => {
   const guildId = req.body.guild;
   const cfg = ensureActivityGuildConfig(guildId);
-  if (!cfg.enabled && (!cfg.activeRoleId || !cfg.inactiveRoleId)) {
-    return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Set both Active and Inactive roles before enabling.')}`);
-  }
+  if (!cfg.enabled && (!cfg.activeRoleId || !cfg.inactiveRoleId)) return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Set both Active and Inactive roles before enabling.')}`);
   cfg.enabled = !cfg.enabled;
   saveActivityConfig(activityConfig);
   if (cfg.enabled) syncActivityRoles(client.guilds.cache.get(guildId));
@@ -2643,12 +2139,8 @@ app.post('/activity/save-timing', (req, res) => {
   const cfg = ensureActivityGuildConfig(guildId);
   const days = parseInt(req.body.thresholdDays, 10);
   const retention = parseInt(req.body.retentionDays, 10);
-  if (!Number.isInteger(days) || days < 1) {
-    return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Threshold must be 1+ days.')}`);
-  }
-  if (!Number.isInteger(retention) || retention < days) {
-    return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Retention must be at least as long as the threshold.')}`);
-  }
+  if (!Number.isInteger(days) || days < 1) return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Threshold must be 1+ days.')}`);
+  if (!Number.isInteger(retention) || retention < days) return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Retention must be at least as long as the threshold.')}`);
   cfg.thresholdDays = days;
   cfg.retentionDays = retention;
   saveActivityConfig(activityConfig);
@@ -2684,7 +2176,7 @@ app.post('/activity/create-channel', async (req, res) => {
   const cfg = ensureActivityGuildConfig(guildId);
   try {
     const permissionOverwrites = [];
-    if (cfg.inactiveRoleId) permissionOverwrites.push({ id: cfg.inactiveRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] });
+    if (cfg.inactiveRoleId) permissionOverwrites.push({ id: cfg.inactiveRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.SendMessages] });
     const channel = await guild.channels.create({ name: 're-activate', type: ChannelType.GuildText, reason: 'Created via dashboard', permissionOverwrites });
     cfg.quarantineChannelId = channel.id;
     saveActivityConfig(activityConfig);
@@ -2698,9 +2190,7 @@ app.post('/activity/post-button', async (req, res) => {
   const guildId = req.body.guild;
   const guild = client.guilds.cache.get(guildId);
   const cfg = ensureActivityGuildConfig(guildId);
-  if (!cfg.quarantineChannelId) {
-    return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Set a quarantine channel first.')}`);
-  }
+  if (!cfg.quarantineChannelId) return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Set a quarantine channel first.')}`);
   try {
     const channel = await guild.channels.fetch(cfg.quarantineChannelId);
     const { embed, row } = buildReactivationEmbedAndRow();
@@ -2717,6 +2207,18 @@ app.post('/activity/purge-now', (req, res) => {
   res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent(pruned > 0 ? `Purged ${pruned} stale record(s).` : 'Nothing to purge.')}`);
 });
 
+app.post('/activity/sync-perms', async (req, res) => {
+  const guildId = req.body.guild;
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.redirect(`/activity?guild=${guildId}`);
+  try {
+    const count = await enforceQuarantinePermissions(guild);
+    res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent(`Permissions explicitly enforced on ${count} channels.`)}`);
+  } catch (err) {
+    res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent(`Failed: ${err.message}`)}`);
+  }
+});
+
 // ---- Channel Index ----
 app.get('/channel-index', (req, res) => {
   const guildId = resolveGuildId(req);
@@ -2727,37 +2229,17 @@ app.get('/channel-index', (req, res) => {
   const categories = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildCategory).values()].sort((a, b) => a.rawPosition - b.rawPosition);
   const allChannels = getChannelData(guild);
 
-  const categoryChecklist =
-    categories.map((c) => `<label class="check-item"><input type="checkbox" name="excludedCategoryIds" value="${c.id}" ${cfg.excludedCategoryIds.includes(c.id) ? 'checked' : ''}> ${escapeHtml(c.name)}</label>`).join('') ||
-    '<p class="muted">No categories found.</p>';
-  const channelChecklist =
-    allChannels
-      .map(
-        (c) =>
-          `<label class="check-item"><input type="checkbox" name="excludedChannelIds" value="${c.id}" ${cfg.excludedChannelIds.includes(c.id) ? 'checked' : ''}> #${escapeHtml(c.name)} ${
-            c.category ? `<span class="muted">(${escapeHtml(c.category)})</span>` : ''
-          }</label>`
-      )
-      .join('') || '<p class="muted">No channels found.</p>';
+  const categoryChecklist = categories.map((c) => `<label class="check-item"><input type="checkbox" name="excludedCategoryIds" value="${c.id}" ${cfg.excludedCategoryIds.includes(c.id) ? 'checked' : ''}> ${escapeHtml(c.name)}</label>`).join('') || '<p class="muted">No categories found.</p>';
+  const channelChecklist = allChannels.map((c) => `<label class="check-item"><input type="checkbox" name="excludedChannelIds" value="${c.id}" ${cfg.excludedChannelIds.includes(c.id) ? 'checked' : ''}> #${escapeHtml(c.name)} ${c.category ? `<span class="muted">(${escapeHtml(c.category)})</span>` : ''}</label>`).join('') || '<p class="muted">No channels found.</p>';
 
   const descriptions = loadDescriptions(guildId);
-  const descRows = allChannels
-    .map(
-      (c) => `
-    <tr>
-      <td>#${escapeHtml(c.name)}</td>
-      <td class="muted">${escapeHtml(c.category || '—')}</td>
-      <td><input type="text" name="desc_${c.id}" value="${escapeHtml(descriptions[c.id]?.description || '')}" placeholder="Optional blurb..."></td>
-    </tr>`
-    )
-    .join('');
+  const descRows = allChannels.map((c) => `<tr><td>#${escapeHtml(c.name)}</td><td class="muted">${escapeHtml(c.category || '—')}</td><td><input type="text" name="desc_${c.id}" value="${escapeHtml(descriptions[c.id]?.description || '')}" placeholder="Optional blurb..."></td></tr>`).join('');
 
   const body = `
     <div class="card">
       <h2># Channel Index — ${escapeHtml(guild.name)}</h2>
       <p class="muted">Controls what <code>/channel-index</code> leaves out when it posts. Doesn't affect the channels themselves.</p>
     </div>
-
     <div class="card">
       <form method="POST" action="/channel-index/save-exclusions">
         <input type="hidden" name="guild" value="${guildId}">
@@ -2771,7 +2253,6 @@ app.get('/channel-index', (req, res) => {
         <div class="btn-row"><button type="submit">Save Exclusions</button></div>
       </form>
     </div>
-
     <div class="card">
       <h3>Channel descriptions</h3>
       <p class="muted">Shown next to each channel in the posted index.</p>
@@ -2793,10 +2274,7 @@ app.post('/channel-index/save-exclusions', (req, res) => {
   const cfg = ensureChannelIndexGuildConfig(guildId);
   cfg.excludedCategoryIds = asArray(req.body.excludedCategoryIds);
   cfg.excludedChannelIds = asArray(req.body.excludedChannelIds);
-  cfg.excludedNameKeywords = String(req.body.excludedNameKeywords || '')
-    .split('\n')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
+  cfg.excludedNameKeywords = String(req.body.excludedNameKeywords || '').split('\n').map((s) => s.trim().toLowerCase()).filter(Boolean);
   saveChannelIndexConfig(channelIndexConfig);
   res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('Exclusions saved.')}`);
 });
