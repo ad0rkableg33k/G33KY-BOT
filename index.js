@@ -1183,12 +1183,13 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (id === 'setup:activity:apply-restrictions') {
+      await interaction.deferUpdate(); // this can take a few seconds on a server with many channels
       const result = await applyInactiveChannelRestrictions(interaction.guild);
       if (!result.success) {
-        await interaction.reply({ content: `❌ ${result.reason}`, ephemeral: true });
+        await interaction.followUp({ content: `❌ ${result.reason}`, ephemeral: true });
         return;
       }
-      await interaction.update(buildActivityChannelsMenuMessage(guildId));
+      await interaction.editReply(buildActivityChannelsMenuMessage(guildId));
       const failedNote = result.failed.length > 0 ? `\n⚠️ Failed on ${result.failed.length} channel(s) — check the bot has **Manage Roles** and can see those channels.` : '';
       await interaction.followUp({
         content: `🔒 Applied to **${result.updated}** channel(s). Inactive is now locked out everywhere except the quarantine channel, and any channel created from now on will be locked down automatically.${failedNote}`,

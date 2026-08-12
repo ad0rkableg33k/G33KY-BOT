@@ -108,6 +108,9 @@ Activity configuration may include:
 * Activity threshold
 * Reactivation/quarantine channel
 * Exempt roles
+* Whether channel-permission restrictions have been applied for the Inactive role
+
+Separately, if a server administrator explicitly enables the Activity Tracker's channel-restriction feature, G33KY BOT will edit Discord channel permission overwrites for the configured Inactive role, restricting that role's access to channels other than the designated quarantine/reactivation channel. This is not personal information about any individual member — it is a server-wide permission setting affecting a role — but is disclosed here because it is a configuration change the Bot can make when an administrator turns the feature on. This feature is never applied automatically or without administrator action.
 
 5. Data Storage
 
