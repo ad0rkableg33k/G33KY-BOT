@@ -218,7 +218,7 @@ const ACTIVITY_CONFIG_FILE = dataPath('activity-config.json');
 const ACTIVITY_DATA_FILE = dataPath('activity-data.json');
 const DEFAULT_THRESHOLD_DAYS = 30;
 const DEFAULT_RETENTION_DAYS = 90; // how long a raw activity timestamp is kept before being purged entirely
-const ACTIVITY_VOICE_MINUTES_REQUIRED = 1;
+const DEFAULT_VOICE_MINUTES_REQUIRED = 1; // continuous minutes in a single voice session before it counts as activity
 
 function loadActivityConfig() {
   try {
@@ -252,6 +252,7 @@ function ensureActivityGuildConfig(guildId) {
       monitoredChannels: [],
       retentionDays: DEFAULT_RETENTION_DAYS,
       channelRestrictionsApplied: false,
+      voiceMinutesRequired: DEFAULT_VOICE_MINUTES_REQUIRED,
     };
   }
   // Normalize configs saved before these fields existed
@@ -260,6 +261,9 @@ function ensureActivityGuildConfig(guildId) {
   }
   if (activityConfig[guildId].retentionDays === undefined) {
     activityConfig[guildId].retentionDays = DEFAULT_RETENTION_DAYS;
+  }
+  if (activityConfig[guildId].voiceMinutesRequired === undefined) {
+    activityConfig[guildId].voiceMinutesRequired = DEFAULT_VOICE_MINUTES_REQUIRED;
   }
   if (activityConfig[guildId].channelRestrictionsApplied === undefined) {
     activityConfig[guildId].channelRestrictionsApplied = false;
@@ -303,7 +307,10 @@ function getMemberActivity(guildId, userId) {
 // periodically so long-running sessions count without requiring the
 // member to ever leave.
 const activityVoiceSessions = new Map(); // "guildId:userId" -> { joinedAt, channelId }
-const ACTIVITY_VOICE_MS_REQUIRED = ACTIVITY_VOICE_MINUTES_REQUIRED * 60 * 1000;
+
+function voiceMsRequired(cfg) {
+  return (cfg.voiceMinutesRequired ?? DEFAULT_VOICE_MINUTES_REQUIRED) * 60 * 1000;
+}
 
 function markVoiceActive(guildId, userId) {
   const activity = getMemberActivity(guildId, userId);
@@ -319,7 +326,7 @@ function finalizeActivityVoiceSession(guildId, userId, key) {
   // Empty monitoredChannels = track everywhere (default). Non-empty = only
   // count voice time spent in one of the picked channels.
   if (cfg.monitoredChannels.length && !cfg.monitoredChannels.includes(session.channelId)) return;
-  if (Date.now() - session.joinedAt >= ACTIVITY_VOICE_MS_REQUIRED) {
+  if (Date.now() - session.joinedAt >= voiceMsRequired(cfg)) {
     markVoiceActive(guildId, userId);
   }
 }
@@ -355,8 +362,14 @@ client.on('voiceStateUpdate', (oldState, newState) => {
 // periodic schedule as the sweep below, so it's self-healing against any
 // future missed events too (e.g. a brief Gateway reconnect gap).
 async function reconcileConnectedVoiceMembers() {
+  let totalCredited = 0;
   for (const guild of client.guilds.cache.values()) {
-    await guild.members.fetch().catch(() => {}); // needed so channel.members resolves correctly
+    try {
+      await guild.members.fetch();
+    } catch (err) {
+      console.error(`[activity-voice] Failed to fetch members for guild ${guild.id} — reconciliation skipped this guild this pass:`, err.message);
+      continue;
+    }
     const cfg = ensureActivityGuildConfig(guild.id);
     for (const channel of guild.channels.cache.values()) {
       if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildStageVoice) continue;
@@ -365,24 +378,27 @@ async function reconcileConnectedVoiceMembers() {
         if (member.user.bot) continue;
         markVoiceActive(guild.id, member.id);
         activityVoiceSessions.set(`${guild.id}:${member.id}`, { joinedAt: Date.now(), channelId: channel.id });
+        totalCredited++;
       }
     }
   }
+  console.log(`[activity-voice] Reconciliation pass: credited ${totalCredited} member(s) currently connected to voice.`);
+  return totalCredited;
 }
 
 // Sweep every 5 min: reconcile who's actually connected right now (fixes
 // the restart edge case above and self-heals missed events), and also
-// finalize any tracked session that's crossed the 1-minute mark.
+// finalize any tracked session that's crossed each guild's configured
+// voice-minutes threshold.
 setInterval(async () => {
   await reconcileConnectedVoiceMembers();
   const now = Date.now();
   for (const [key, session] of activityVoiceSessions.entries()) {
-    if (now - session.joinedAt >= ACTIVITY_VOICE_MS_REQUIRED) {
-      const [guildId, userId] = key.split(':');
-      const cfg = ensureActivityGuildConfig(guildId);
-      if (cfg.monitoredChannels.length && !cfg.monitoredChannels.includes(session.channelId)) continue;
-      markVoiceActive(guildId, userId);
-    }
+    const [guildId, userId] = key.split(':');
+    const cfg = ensureActivityGuildConfig(guildId);
+    if (now - session.joinedAt < voiceMsRequired(cfg)) continue;
+    if (cfg.monitoredChannels.length && !cfg.monitoredChannels.includes(session.channelId)) continue;
+    markVoiceActive(guildId, userId);
   }
 }, 5 * 60 * 1000);
 
@@ -404,12 +420,30 @@ client.on('messageCreate', (message) => {
 // on the schedule so we're not hammering the API on every command.
 async function syncActivityRoles(guild) {
   const config = ensureActivityGuildConfig(guild.id);
-  if (!config.enabled || !config.activeRoleId || !config.inactiveRoleId) return;
+  if (!config.enabled) {
+    console.log(`[activity-sync] Skipping ${guild.id} — activity tracking is disabled for this server.`);
+    return;
+  }
+  if (!config.activeRoleId || !config.inactiveRoleId) {
+    console.log(`[activity-sync] Skipping ${guild.id} — Active and/or Inactive role isn't set yet.`);
+    return;
+  }
 
   const thresholdMs = config.thresholdDays * 24 * 60 * 60 * 1000;
   const now = Date.now();
 
-  const members = await guild.members.fetch();
+  let members;
+  try {
+    members = await guild.members.fetch();
+  } catch (err) {
+    console.error(`[activity-sync] Failed to fetch members for guild ${guild.id} — sync aborted this pass:`, err.message);
+    return;
+  }
+
+  let madeActive = 0;
+  let madeInactive = 0;
+  let failed = 0;
+
   for (const member of members.values()) {
     if (member.user.bot) continue;
     if (config.exemptRoleIds.some((r) => member.roles.cache.has(r))) continue;
@@ -426,16 +460,25 @@ async function syncActivityRoles(guild) {
 
     try {
       if (isActive) {
-        if (!member.roles.cache.has(config.activeRoleId)) await member.roles.add(config.activeRoleId);
+        if (!member.roles.cache.has(config.activeRoleId)) {
+          await member.roles.add(config.activeRoleId);
+          madeActive++;
+        }
         if (member.roles.cache.has(config.inactiveRoleId)) await member.roles.remove(config.inactiveRoleId);
       } else {
-        if (!member.roles.cache.has(config.inactiveRoleId)) await member.roles.add(config.inactiveRoleId);
+        if (!member.roles.cache.has(config.inactiveRoleId)) {
+          await member.roles.add(config.inactiveRoleId);
+          madeInactive++;
+        }
         if (member.roles.cache.has(config.activeRoleId)) await member.roles.remove(config.activeRoleId);
       }
     } catch (err) {
-      console.error(`Activity role sync failed for ${member.id} in ${guild.id}:`, err.message);
+      failed++;
+      console.error(`[activity-sync] Role update failed for member ${member.id} in ${guild.id}:`, err.message);
     }
   }
+
+  console.log(`[activity-sync] ${guild.id}: checked ${members.size} member(s) — ${madeActive} newly Active, ${madeInactive} newly Inactive, ${failed} failed.`);
 }
 
 async function syncAllActivityGuilds() {
@@ -724,6 +767,7 @@ function buildActivityMenuMessage(guildId) {
     .setDescription(
       `**Status:** ${cfg.enabled ? '🟢 Enabled' : '🔴 Disabled'}\n` +
         `**Threshold:** ${cfg.thresholdDays} days\n` +
+        `**Voice minutes required:** ${cfg.voiceMinutesRequired ?? DEFAULT_VOICE_MINUTES_REQUIRED} continuous minute(s)\n` +
         `**Retention:** ${cfg.retentionDays ?? DEFAULT_RETENTION_DAYS} days (records auto-deleted after this)\n` +
         `**Quarantine Channel:** ${cfg.quarantineChannelId ? `<#${cfg.quarantineChannelId}>` : 'Not set'}\n` +
         `**Active Role:** ${cfg.activeRoleId ? `<@&${cfg.activeRoleId}>` : 'Not set'}\n` +
@@ -1033,13 +1077,24 @@ client.on('interactionCreate', async (interaction) => {
         .setStyle(TextInputStyle.Short)
         .setValue(String(cfg.retentionDays ?? DEFAULT_RETENTION_DAYS))
         .setRequired(true);
-      modal.addComponents(new ActionRowBuilder().addComponents(daysInput), new ActionRowBuilder().addComponents(retentionInput));
+      const voiceMinutesInput = new TextInputBuilder()
+        .setCustomId('voiceMinutes')
+        .setLabel('Continuous voice minutes to count as active')
+        .setStyle(TextInputStyle.Short)
+        .setValue(String(cfg.voiceMinutesRequired ?? DEFAULT_VOICE_MINUTES_REQUIRED))
+        .setRequired(true);
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(daysInput),
+        new ActionRowBuilder().addComponents(retentionInput),
+        new ActionRowBuilder().addComponents(voiceMinutesInput)
+      );
       return interaction.showModal(modal);
     }
 
     if (id === 'setup:activity:threshold:modal') {
       const days = parseInt(interaction.fields.getTextInputValue('days'), 10);
       const retention = parseInt(interaction.fields.getTextInputValue('retention'), 10);
+      const voiceMinutes = parseInt(interaction.fields.getTextInputValue('voiceMinutes'), 10);
       if (!Number.isInteger(days) || days < 1) {
         return interaction.reply({ content: '❌ Threshold must be a whole number of days, 1 or more.', ephemeral: true });
       }
@@ -1052,9 +1107,13 @@ client.on('interactionCreate', async (interaction) => {
           ephemeral: true,
         });
       }
+      if (!Number.isInteger(voiceMinutes) || voiceMinutes < 1) {
+        return interaction.reply({ content: '❌ Voice minutes must be a whole number, 1 or more.', ephemeral: true });
+      }
       const cfg = ensureActivityGuildConfig(guildId);
       cfg.thresholdDays = days;
       cfg.retentionDays = retention;
+      cfg.voiceMinutesRequired = voiceMinutes;
       saveActivityConfig(activityConfig);
       return interaction.update(buildActivityMenuMessage(guildId));
     }
@@ -1409,6 +1468,12 @@ const commands = [
         .setName('set-threshold')
         .setDescription('Days of inactivity before someone is marked inactive (default 30)')
         .addIntegerOption((opt) => opt.setName('days').setDescription('Number of days').setRequired(true).setMinValue(1))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-voice-minutes')
+        .setDescription('Continuous minutes in voice required to count as activity (default 1)')
+        .addIntegerOption((opt) => opt.setName('minutes').setDescription('Number of minutes').setRequired(true).setMinValue(1))
     )
     .addSubcommand((sub) =>
       sub
@@ -1860,6 +1925,11 @@ client.on('interactionCreate', async (interaction) => {
         guildConfig.thresholdDays = days;
         saveActivityConfig(activityConfig);
         await interaction.reply(`✅ Inactivity threshold set to **${days} day(s)**.`);
+      } else if (sub === 'set-voice-minutes') {
+        const minutes = interaction.options.getInteger('minutes');
+        guildConfig.voiceMinutesRequired = minutes;
+        saveActivityConfig(activityConfig);
+        await interaction.reply(`✅ Members now need **${minutes} continuous minute(s)** in voice to count as active.`);
       } else if (sub === 'set-retention') {
         const days = interaction.options.getInteger('days');
         if (days < guildConfig.thresholdDays) {
@@ -1913,6 +1983,7 @@ client.on('interactionCreate', async (interaction) => {
           .addFields(
             { name: 'Enabled', value: guildConfig.enabled ? 'Yes' : 'No', inline: true },
             { name: 'Threshold', value: `${guildConfig.thresholdDays} days`, inline: true },
+            { name: 'Voice minutes required', value: `${guildConfig.voiceMinutesRequired ?? DEFAULT_VOICE_MINUTES_REQUIRED} min`, inline: true },
             { name: 'Retention', value: `${guildConfig.retentionDays ?? DEFAULT_RETENTION_DAYS} days`, inline: true },
             { name: 'Active role', value: guildConfig.activeRoleId ? `<@&${guildConfig.activeRoleId}>` : 'Not set', inline: true },
             { name: 'Inactive role', value: guildConfig.inactiveRoleId ? `<@&${guildConfig.inactiveRoleId}>` : 'Not set', inline: true },
@@ -2442,7 +2513,7 @@ app.get('/', async (req, res) => {
   }
 
   const guild = client.guilds.cache.get(guildId);
-  await guild.members.fetch().catch(() => {}); // best-effort, for accurate Active/Inactive counts
+  await guild.members.fetch().catch((err) => console.error(`[dashboard] Failed to fetch members for guild ${guild.id}:`, err.message)); // best-effort, for accurate Active/Inactive counts
 
   const camCfg = ensureGuildConfig(guildId);
   const actCfg = ensureActivityGuildConfig(guildId);
@@ -2720,9 +2791,10 @@ app.get('/activity', (req, res) => {
     <div class="card">
       <form method="POST" action="/activity/save-timing">
         <input type="hidden" name="guild" value="${guildId}">
-        <h3>Threshold & retention</h3>
+        <h3>Threshold, voice minutes & retention</h3>
         <div class="row">
           <div class="field"><label>Inactivity threshold (days)</label><input type="number" name="thresholdDays" min="1" value="${cfg.thresholdDays}"></div>
+          <div class="field"><label>Continuous voice minutes required</label><input type="number" name="voiceMinutesRequired" min="1" value="${cfg.voiceMinutesRequired ?? DEFAULT_VOICE_MINUTES_REQUIRED}"></div>
           <div class="field"><label>Data retention (days)</label><input type="number" name="retentionDays" min="1" value="${cfg.retentionDays ?? DEFAULT_RETENTION_DAYS}"></div>
         </div>
         <div class="btn-row"><button type="submit">Save</button></div>
@@ -2777,14 +2849,19 @@ app.post('/activity/save-timing', (req, res) => {
   const cfg = ensureActivityGuildConfig(guildId);
   const days = parseInt(req.body.thresholdDays, 10);
   const retention = parseInt(req.body.retentionDays, 10);
+  const voiceMinutes = parseInt(req.body.voiceMinutesRequired, 10);
   if (!Number.isInteger(days) || days < 1) {
     return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Threshold must be 1+ days.')}`);
   }
   if (!Number.isInteger(retention) || retention < days) {
     return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Retention must be at least as long as the threshold.')}`);
   }
+  if (!Number.isInteger(voiceMinutes) || voiceMinutes < 1) {
+    return res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Voice minutes must be 1 or more.')}`);
+  }
   cfg.thresholdDays = days;
   cfg.retentionDays = retention;
+  cfg.voiceMinutesRequired = voiceMinutes;
   saveActivityConfig(activityConfig);
   res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Saved.')}`);
 });
