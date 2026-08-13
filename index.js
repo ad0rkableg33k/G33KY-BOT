@@ -686,7 +686,8 @@ function buildMainMenuMessage() {
     .setPlaceholder('Select a module to configure...')
     .addOptions(
       { label: 'Camera Policy', description: 'Cameras-on voice channel policy', value: 'camera', emoji: '📷' },
-      { label: 'Activity Tracker', description: 'Track member activity & auto-role members', value: 'activity', emoji: '📊' }
+      { label: 'Activity Tracker', description: 'Track member activity & auto-role members', value: 'activity', emoji: '📊' },
+      { label: 'Category Permissions', description: 'Bulk-apply role perms across categories', value: 'catperms', emoji: '🔐' }
     );
 
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(moduleSelect)] };
@@ -904,6 +905,9 @@ client.on('interactionCreate', async (interaction) => {
       const choice = interaction.values[0];
       if (choice === 'camera') return interaction.update(buildCameraMenuMessage(guildId));
       if (choice === 'activity') return interaction.update(buildActivityMenuMessage(guildId));
+      if (choice === 'catperms') {
+        return interaction.reply({ content: '🔐 **Category Permissions** is managed from the web dashboard — head to the **Category Perms** tab to build templates and apply them! You can also use `/category-perms apply`, `/category-perms unsync`, and `/category-perms list-templates` from Discord directly.', ephemeral: true });
+      }
       return;
     }
     if (id === 'setup:camera:menu') return interaction.update(buildCameraMenuMessage(guildId));
@@ -1325,6 +1329,140 @@ function ensureChannelIndexGuildConfig(guildId) {
   return channelIndexConfig[guildId];
 }
 
+// ============================================================
+// Category Permissions — bulk apply role permission overwrites
+// across one or more categories (and optionally their child channels),
+// with reusable saved templates per guild.
+// ============================================================
+const CATEGORY_PERMS_CONFIG_FILE = dataPath('category-perms-config.json');
+
+// The permission flags we expose in the UI — the most commonly needed ones
+// for community server role management.
+const MANAGED_PERMS = [
+  { key: 'ViewChannel',             label: 'View Channel' },
+  { key: 'SendMessages',            label: 'Send Messages' },
+  { key: 'ReadMessageHistory',      label: 'Read Message History' },
+  { key: 'AddReactions',            label: 'Add Reactions' },
+  { key: 'EmbedLinks',              label: 'Embed Links' },
+  { key: 'AttachFiles',             label: 'Attach Files' },
+  { key: 'UseApplicationCommands',  label: 'Use Application Commands' },
+  { key: 'Connect',                 label: 'Connect (Voice)' },
+  { key: 'Speak',                   label: 'Speak (Voice)' },
+  { key: 'Stream',                  label: 'Stream / Go Live (Voice)' },
+  { key: 'UseEmbeddedActivities',   label: 'Use Activities (Voice)' },
+];
+
+function loadCategoryPermsConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(CATEGORY_PERMS_CONFIG_FILE, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveCategoryPermsConfig(config) {
+  try {
+    fs.writeFileSync(CATEGORY_PERMS_CONFIG_FILE, JSON.stringify(config, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`Failed to save category-perms-config.json to ${CATEGORY_PERMS_CONFIG_FILE}:`, err.message);
+    return false;
+  }
+}
+
+let categoryPermsConfig = loadCategoryPermsConfig();
+
+function ensureCategoryPermsGuildConfig(guildId) {
+  if (!categoryPermsConfig[guildId]) {
+    categoryPermsConfig[guildId] = { templates: [] };
+    saveCategoryPermsConfig(categoryPermsConfig);
+  }
+  return categoryPermsConfig[guildId];
+}
+
+// Apply a template to one or more categories.
+// cascade=true also applies to every child channel inside each category.
+// Returns { updated, failed[] }
+async function applyCategoryPermsTemplate(guild, template, categoryIds, cascade) {
+  let updated = 0;
+  const failed = [];
+
+  for (const catId of categoryIds) {
+    const category = guild.channels.cache.get(catId);
+    if (!category || category.type !== ChannelType.GuildCategory) {
+      failed.push({ id: catId, name: catId, error: 'Not a category or not found' });
+      continue;
+    }
+
+    for (const rolePerms of template.rolePerms) {
+      const overwrite = {};
+      for (const [perm, val] of Object.entries(rolePerms.perms)) {
+        if (val === 'allow') overwrite[perm] = true;
+        else if (val === 'deny') overwrite[perm] = false;
+        // 'neutral' = omit from overwrite object (inherits)
+      }
+      try {
+        await category.permissionOverwrites.edit(rolePerms.roleId, overwrite);
+        updated++;
+      } catch (err) {
+        failed.push({ id: catId, name: category.name, error: err.message });
+      }
+
+      if (cascade) {
+        const children = guild.channels.cache.filter((c) => c.parentId === catId && c.type !== ChannelType.GuildCategory);
+        for (const child of children.values()) {
+          try {
+            await child.permissionOverwrites.edit(rolePerms.roleId, overwrite);
+            updated++;
+          } catch (err) {
+            failed.push({ id: child.id, name: child.name, error: err.message });
+          }
+        }
+      }
+    }
+  }
+
+  return { updated, failed };
+}
+
+// Remove ALL permission overwrites for a set of role IDs from the given
+// category IDs (and optionally their child channels).
+async function unsyncCategoryPerms(guild, roleIds, categoryIds, cascade) {
+  let updated = 0;
+  const failed = [];
+
+  for (const catId of categoryIds) {
+    const category = guild.channels.cache.get(catId);
+    if (!category || category.type !== ChannelType.GuildCategory) {
+      failed.push({ id: catId, name: catId, error: 'Not a category or not found' });
+      continue;
+    }
+
+    for (const roleId of roleIds) {
+      try {
+        await category.permissionOverwrites.delete(roleId);
+        updated++;
+      } catch (err) {
+        failed.push({ id: catId, name: category.name, error: err.message });
+      }
+
+      if (cascade) {
+        const children = guild.channels.cache.filter((c) => c.parentId === catId && c.type !== ChannelType.GuildCategory);
+        for (const child of children.values()) {
+          try {
+            await child.permissionOverwrites.delete(roleId);
+            updated++;
+          } catch (err) {
+            failed.push({ id: child.id, name: child.name, error: err.message });
+          }
+        }
+      }
+    }
+  }
+
+  return { updated, failed };
+}
+
 // Human-readable names for Discord's channel type numbers
 const CHANNEL_TYPE_NAMES = {
   [ChannelType.GuildText]: 'text',
@@ -1514,6 +1652,27 @@ const commands = [
         .setDescription("Manually check one member's activity status")
         .addUserOption((opt) => opt.setName('user').setDescription('Member to check').setRequired(true))
     ),
+  new SlashCommandBuilder()
+    .setName('category-perms')
+    .setDescription('Bulk apply or remove role permission overwrites across categories')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((sub) =>
+      sub
+        .setName('apply')
+        .setDescription('Apply a saved template to one or more categories')
+        .addStringOption((opt) => opt.setName('template').setDescription('Template name').setRequired(true))
+        .addStringOption((opt) => opt.setName('categories').setDescription('Category IDs (comma-separated)').setRequired(true))
+        .addBooleanOption((opt) => opt.setName('cascade').setDescription('Also apply to channels inside each category?').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('unsync')
+        .setDescription('Remove all overwrites for specific roles from categories (and optionally their channels)')
+        .addStringOption((opt) => opt.setName('roles').setDescription('Role IDs to strip (comma-separated)').setRequired(true))
+        .addStringOption((opt) => opt.setName('categories').setDescription('Category IDs (comma-separated)').setRequired(true))
+        .addBooleanOption((opt) => opt.setName('cascade').setDescription('Also strip from channels inside each category?').setRequired(true))
+    )
+    .addSubcommand((sub) => sub.setName('list-templates').setDescription('List saved permission templates for this server')),
 ].map((cmd) => cmd.toJSON());
 
 // ---- Register slash commands with Discord (GLOBAL = works in every server
@@ -2027,6 +2186,43 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
+    if (interaction.commandName === 'category-perms') {
+      const sub = interaction.options.getSubcommand();
+      const guildCfg = ensureCategoryPermsGuildConfig(interaction.guildId);
+
+      if (sub === 'list-templates') {
+        if (!guildCfg.templates.length) {
+          return interaction.reply({ content: 'No templates saved yet. Create them from the dashboard at `/category-perms` page.', ephemeral: true });
+        }
+        const list = guildCfg.templates.map((t, i) => `**${i + 1}. ${t.name}** — ${t.rolePerms.length} role(s)`).join('\n');
+        return interaction.reply({ content: `**Saved templates:**\n${list}`, ephemeral: true });
+      }
+
+      if (sub === 'apply') {
+        const templateName = interaction.options.getString('template').trim();
+        const template = guildCfg.templates.find((t) => t.name.toLowerCase() === templateName.toLowerCase());
+        if (!template) {
+          return interaction.reply({ content: `❌ No template named **${templateName}** found. Use \`/category-perms list-templates\` to see what's saved.`, ephemeral: true });
+        }
+        const categoryIds = interaction.options.getString('categories').split(',').map((s) => s.trim()).filter(Boolean);
+        const cascade = interaction.options.getBoolean('cascade');
+        await interaction.deferReply({ ephemeral: true });
+        const result = await applyCategoryPermsTemplate(interaction.guild, template, categoryIds, cascade);
+        const failNote = result.failed.length ? `\n⚠️ Failed on ${result.failed.length} item(s) — check bot has Manage Roles & Manage Channels.` : '';
+        return interaction.editReply(`✅ Applied template **${template.name}** to ${categoryIds.length} categor${categoryIds.length === 1 ? 'y' : 'ies'} — **${result.updated}** overwrite(s) updated.${cascade ? ' (cascaded to child channels)' : ''}${failNote}`);
+      }
+
+      if (sub === 'unsync') {
+        const roleIds = interaction.options.getString('roles').split(',').map((s) => s.trim()).filter(Boolean);
+        const categoryIds = interaction.options.getString('categories').split(',').map((s) => s.trim()).filter(Boolean);
+        const cascade = interaction.options.getBoolean('cascade');
+        await interaction.deferReply({ ephemeral: true });
+        const result = await unsyncCategoryPerms(interaction.guild, roleIds, categoryIds, cascade);
+        const failNote = result.failed.length ? `\n⚠️ Failed on ${result.failed.length} item(s) — check bot has Manage Roles & Manage Channels.` : '';
+        return interaction.editReply(`✅ Removed overwrites for ${roleIds.length} role(s) from ${categoryIds.length} categor${categoryIds.length === 1 ? 'y' : 'ies'} — **${result.updated}** overwrite(s) cleared.${cascade ? ' (cascaded to child channels)' : ''}${failNote}`);
+      }
+    }
+
     if (interaction.commandName === 'channel-index') {
       await interaction.deferReply();
       const categoryFilter = interaction.options.getString('category');
@@ -2370,6 +2566,7 @@ function renderLayout({ title, guildId, currentPath, body, flash }) {
     { path: '/camera', label: 'Camera Policy' },
     { path: '/activity', label: 'Activity Tracker' },
     { path: '/channel-index', label: 'Channel Index' },
+    { path: '/category-perms', label: 'Category Perms' },
   ];
 
   return `<!DOCTYPE html>
@@ -2568,6 +2765,14 @@ app.get('/', async (req, res) => {
         <div class="stat"><div class="num">${descFilled}/${totalChannels}</div><div class="label">Descriptions filled in</div></div>
       </div>
       <p style="margin-top:12px;"><a href="/channel-index?guild=${guildId}">Configure →</a></p>
+    </div>
+
+    <div class="card">
+      <h3>🔐 Category Permissions</h3>
+      <div class="stat-grid">
+        <div class="stat"><div class="num">${ensureCategoryPermsGuildConfig(guildId).templates.length}</div><div class="label">Saved templates</div></div>
+      </div>
+      <p style="margin-top:12px;"><a href="/category-perms?guild=${guildId}">Configure →</a></p>
     </div>
   `;
   res.send(renderLayout({ title: 'Overview', guildId, currentPath: '/', body, flash: req.query.flash }));
@@ -3038,6 +3243,285 @@ app.post('/channel-index/save-descriptions', (req, res) => {
   all[guildId] = guildDescriptions;
   saveAllDescriptions(all);
   res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('Descriptions saved.')}`);
+});
+
+// ---- Category Permissions Dashboard ----
+app.get('/category-perms', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.redirect('/');
+  const cfg = ensureCategoryPermsGuildConfig(guildId);
+
+  const categories = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildCategory).values()].sort((a, b) => a.rawPosition - b.rawPosition);
+  const roles = [...guild.roles.cache.filter((r) => r.id !== guild.id).values()].sort((a, b) => b.position - a.position);
+
+  const categoryCheckboxes = categories
+    .map((c) => `<label class="check-item"><input type="checkbox" class="cat-check" name="categoryIds" value="${c.id}"> ${escapeHtml(c.name)}</label>`)
+    .join('') || '<p class="muted">No categories found.</p>';
+
+  const unsyncCategoryCheckboxes = categories
+    .map((c) => `<label class="check-item"><input type="checkbox" name="categoryIds" value="${c.id}"> ${escapeHtml(c.name)}</label>`)
+    .join('') || '<p class="muted">No categories found.</p>';
+
+  const roleOptions = roles.map((r) => `<option value="${r.id}">${escapeHtml(r.name)}</option>`).join('');
+  const unsyncRoleCheckboxes = roles
+    .map((r) => `<label class="check-item"><input type="checkbox" name="roleIds" value="${r.id}"> ${escapeHtml(r.name)}</label>`)
+    .join('') || '<p class="muted">No roles found.</p>';
+
+  // Build the permission rows for the template builder
+  const permRows = MANAGED_PERMS.map((p) => `
+    <tr>
+      <td style="font-size:13px;">${escapeHtml(p.label)}</td>
+      <td><select name="perm_${p.key}" style="width:100%;">
+        <option value="neutral">— Inherit —</option>
+        <option value="allow">✅ Allow</option>
+        <option value="deny">❌ Deny</option>
+      </select></td>
+    </tr>`).join('');
+
+  // Build the saved templates list
+  const templatesList = cfg.templates.length
+    ? cfg.templates.map((t, i) => `
+      <div class="card" style="margin-bottom:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+          <div>
+            <strong>${escapeHtml(t.name)}</strong>
+            <span class="muted" style="margin-left:8px;">${t.rolePerms.length} role(s) configured</span>
+            <div style="margin-top:6px;font-size:12px;color:var(--text-dim);">
+              ${t.rolePerms.map((rp) => {
+                const role = guild.roles.cache.get(rp.roleId);
+                const permsStr = Object.entries(rp.perms)
+                  .filter(([, v]) => v !== 'neutral')
+                  .map(([k, v]) => `${v === 'allow' ? '✅' : '❌'} ${MANAGED_PERMS.find((p) => p.key === k)?.label || k}`)
+                  .join(', ') || 'all inherit';
+                return `<div><strong>${escapeHtml(role?.name || rp.roleId)}:</strong> ${escapeHtml(permsStr)}</div>`;
+              }).join('')}
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <form method="POST" action="/category-perms/delete-template" style="margin:0;">
+              <input type="hidden" name="guild" value="${guildId}">
+              <input type="hidden" name="templateIndex" value="${i}">
+              <button class="danger" type="submit" style="padding:6px 12px;font-size:12px;" onclick="return confirm('Delete template ${escapeHtml(t.name)}?')">Delete</button>
+            </form>
+          </div>
+        </div>
+        <hr style="border-color:var(--panel-border);margin:12px 0;">
+        <form method="POST" action="/category-perms/apply">
+          <input type="hidden" name="guild" value="${guildId}">
+          <input type="hidden" name="templateIndex" value="${i}">
+          <div class="row" style="align-items:flex-end;gap:12px;">
+            <div class="field"><label>Apply to categories</label>
+              <div class="checklist" style="max-height:150px;">${categories.map((c) => `<label class="check-item"><input type="checkbox" name="categoryIds" value="${c.id}"> ${escapeHtml(c.name)}</label>`).join('')}</div>
+            </div>
+            <div class="field"><label>Cascade to child channels?</label>
+              <select name="cascade">
+                <option value="yes">Yes — categories + all channels inside</option>
+                <option value="no">No — categories only</option>
+              </select>
+            </div>
+          </div>
+          <div class="btn-row"><button type="submit">🚀 Apply This Template</button></div>
+        </form>
+      </div>`).join('')
+    : '<p class="muted">No templates saved yet — create one below.</p>';
+
+  const body = `
+    <div class="card">
+      <h2>🔐 Category Permissions — ${escapeHtml(guild.name)}</h2>
+      <p class="muted">Build reusable permission templates, then bulk-apply them to categories (and optionally their channels) in one action. Great for keeping bot access, staff roles, and verified member perms uniform across all categories.</p>
+    </div>
+
+    <div class="card">
+      <h3>Saved Templates</h3>
+      ${templatesList}
+    </div>
+
+    <div class="card">
+      <h3>Create New Template</h3>
+      <form method="POST" action="/category-perms/save-template">
+        <input type="hidden" name="guild" value="${guildId}">
+        <div class="field" style="margin-bottom:14px;">
+          <label>Template name</label>
+          <input type="text" name="templateName" placeholder="e.g. Staff Roles, Verified Members, Bots" style="max-width:400px;" required>
+        </div>
+        <p class="muted" style="margin-bottom:10px;">Add roles one at a time — save the template first with one role, then edit to add more (or add them all now by submitting once per role).</p>
+        <div class="field" style="margin-bottom:14px;">
+          <label>Role</label>
+          <select name="roleId" style="max-width:400px;">
+            <option value="">-- select a role --</option>
+            ${roleOptions}
+          </select>
+        </div>
+        <h3 style="margin-top:8px;">Permissions for this role</h3>
+        <table style="max-width:500px;">
+          <thead><tr><th>Permission</th><th>Value</th></tr></thead>
+          <tbody>${permRows}</tbody>
+        </table>
+        <div class="btn-row"><button type="submit">💾 Save Template</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>Add Role to Existing Template</h3>
+      <form method="POST" action="/category-perms/add-role-to-template">
+        <input type="hidden" name="guild" value="${guildId}">
+        <div class="row">
+          <div class="field">
+            <label>Template</label>
+            <select name="templateIndex" style="max-width:300px;">
+              ${cfg.templates.map((t, i) => `<option value="${i}">${escapeHtml(t.name)}</option>`).join('') || '<option value="">No templates yet</option>'}
+            </select>
+          </div>
+          <div class="field">
+            <label>Role</label>
+            <select name="roleId" style="max-width:300px;">
+              <option value="">-- select a role --</option>
+              ${roleOptions}
+            </select>
+          </div>
+        </div>
+        <h3 style="margin-top:8px;">Permissions for this role</h3>
+        <table style="max-width:500px;">
+          <thead><tr><th>Permission</th><th>Value</th></tr></thead>
+          <tbody>${MANAGED_PERMS.map((p) => `
+            <tr>
+              <td style="font-size:13px;">${escapeHtml(p.label)}</td>
+              <td><select name="perm_${p.key}" style="width:100%;">
+                <option value="neutral">— Inherit —</option>
+                <option value="allow">✅ Allow</option>
+                <option value="deny">❌ Deny</option>
+              </select></td>
+            </tr>`).join('')}</tbody>
+        </table>
+        <div class="btn-row"><button type="submit">➕ Add Role to Template</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>🔓 Unsync — Remove Role Overwrites</h3>
+      <p class="muted">Strips ALL permission overwrites for the selected roles from the selected categories (and optionally their child channels). This resets those roles to inherit permissions from the server default.</p>
+      <form method="POST" action="/category-perms/unsync" onsubmit="return confirm('This will delete all selected role overwrites from the selected categories/channels. Continue?');">
+        <input type="hidden" name="guild" value="${guildId}">
+        <div class="row">
+          <div class="field">
+            <label>Roles to strip</label>
+            <div class="checklist">${unsyncRoleCheckboxes}</div>
+          </div>
+          <div class="field">
+            <label>From categories</label>
+            <div class="checklist">${unsyncCategoryCheckboxes}</div>
+          </div>
+          <div class="field">
+            <label>Cascade?</label>
+            <select name="cascade">
+              <option value="yes">Yes — categories + all channels inside</option>
+              <option value="no">No — categories only</option>
+            </select>
+          </div>
+        </div>
+        <div class="btn-row"><button class="danger" type="submit">🔓 Unsync / Remove Overwrites</button></div>
+      </form>
+    </div>
+  `;
+  res.send(renderLayout({ title: 'Category Permissions', guildId, currentPath: '/category-perms', body, flash: req.query.flash }));
+});
+
+app.post('/category-perms/save-template', (req, res) => {
+  const guildId = req.body.guild;
+  const cfg = ensureCategoryPermsGuildConfig(guildId);
+  const templateName = String(req.body.templateName || '').trim();
+  const roleId = req.body.roleId;
+  if (!templateName || !roleId) {
+    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Give the template a name and pick a role.')}`);
+  }
+  const perms = {};
+  for (const p of MANAGED_PERMS) {
+    perms[p.key] = req.body[`perm_${p.key}`] || 'neutral';
+  }
+  // If a template with this name already exists, add the role to it
+  const existing = cfg.templates.find((t) => t.name.toLowerCase() === templateName.toLowerCase());
+  if (existing) {
+    const existingRole = existing.rolePerms.find((rp) => rp.roleId === roleId);
+    if (existingRole) {
+      existingRole.perms = perms;
+    } else {
+      existing.rolePerms.push({ roleId, perms });
+    }
+  } else {
+    cfg.templates.push({ name: templateName, rolePerms: [{ roleId, perms }] });
+  }
+  saveCategoryPermsConfig(categoryPermsConfig);
+  res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent(`Template "${templateName}" saved.`)}`);
+});
+
+app.post('/category-perms/add-role-to-template', (req, res) => {
+  const guildId = req.body.guild;
+  const cfg = ensureCategoryPermsGuildConfig(guildId);
+  const idx = parseInt(req.body.templateIndex, 10);
+  const roleId = req.body.roleId;
+  if (isNaN(idx) || !cfg.templates[idx] || !roleId) {
+    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Pick a template and a role.')}`);
+  }
+  const perms = {};
+  for (const p of MANAGED_PERMS) {
+    perms[p.key] = req.body[`perm_${p.key}`] || 'neutral';
+  }
+  const template = cfg.templates[idx];
+  const existingRole = template.rolePerms.find((rp) => rp.roleId === roleId);
+  if (existingRole) {
+    existingRole.perms = perms;
+  } else {
+    template.rolePerms.push({ roleId, perms });
+  }
+  saveCategoryPermsConfig(categoryPermsConfig);
+  res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent(`Role added/updated in template "${template.name}".`)}`);
+});
+
+app.post('/category-perms/delete-template', (req, res) => {
+  const guildId = req.body.guild;
+  const cfg = ensureCategoryPermsGuildConfig(guildId);
+  const idx = parseInt(req.body.templateIndex, 10);
+  if (isNaN(idx) || !cfg.templates[idx]) {
+    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Template not found.')}`);
+  }
+  const name = cfg.templates[idx].name;
+  cfg.templates.splice(idx, 1);
+  saveCategoryPermsConfig(categoryPermsConfig);
+  res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent(`Deleted template "${name}".`)}`);
+});
+
+app.post('/category-perms/apply', async (req, res) => {
+  const guildId = req.body.guild;
+  const guild = client.guilds.cache.get(guildId);
+  const cfg = ensureCategoryPermsGuildConfig(guildId);
+  const idx = parseInt(req.body.templateIndex, 10);
+  if (isNaN(idx) || !cfg.templates[idx]) {
+    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Template not found.')}`);
+  }
+  const categoryIds = asArray(req.body.categoryIds);
+  if (!categoryIds.length) {
+    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Pick at least one category to apply to.')}`);
+  }
+  const cascade = req.body.cascade === 'yes';
+  const template = cfg.templates[idx];
+  const result = await applyCategoryPermsTemplate(guild, template, categoryIds, cascade);
+  const failNote = result.failed.length ? ` (failed on ${result.failed.length} — check bot has Manage Roles & Manage Channels)` : '';
+  res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent(`Applied "${template.name}" to ${categoryIds.length} categor${categoryIds.length === 1 ? 'y' : 'ies'} — ${result.updated} overwrite(s) updated.${cascade ? ' Cascaded to child channels.' : ''}${failNote}`)}`);
+});
+
+app.post('/category-perms/unsync', async (req, res) => {
+  const guildId = req.body.guild;
+  const guild = client.guilds.cache.get(guildId);
+  const roleIds = asArray(req.body.roleIds);
+  const categoryIds = asArray(req.body.categoryIds);
+  if (!roleIds.length || !categoryIds.length) {
+    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Pick at least one role and one category.')}`);
+  }
+  const cascade = req.body.cascade === 'yes';
+  const result = await unsyncCategoryPerms(guild, roleIds, categoryIds, cascade);
+  const failNote = result.failed.length ? ` (failed on ${result.failed.length} — check bot has Manage Roles & Manage Channels)` : '';
+  res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent(`Removed overwrites for ${roleIds.length} role(s) from ${categoryIds.length} categor${categoryIds.length === 1 ? 'y' : 'ies'} — ${result.updated} cleared.${cascade ? ' Cascaded to child channels.' : ''}${failNote}`)}`);
 });
 
 app.listen(PORT, () => {
