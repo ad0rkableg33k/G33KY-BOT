@@ -1336,20 +1336,46 @@ function ensureChannelIndexGuildConfig(guildId) {
 // ============================================================
 const CATEGORY_PERMS_CONFIG_FILE = dataPath('category-perms-config.json');
 
-// The permission flags we expose in the UI — the most commonly needed ones
-// for community server role management.
+// The permission flags we expose in the UI — full set covering general
+// access, text, moderation, and voice permissions.
 const MANAGED_PERMS = [
-  { key: 'ViewChannel',             label: 'View Channel' },
-  { key: 'SendMessages',            label: 'Send Messages' },
-  { key: 'ReadMessageHistory',      label: 'Read Message History' },
-  { key: 'AddReactions',            label: 'Add Reactions' },
-  { key: 'EmbedLinks',              label: 'Embed Links' },
-  { key: 'AttachFiles',             label: 'Attach Files' },
-  { key: 'UseApplicationCommands',  label: 'Use Application Commands' },
-  { key: 'Connect',                 label: 'Connect (Voice)' },
-  { key: 'Speak',                   label: 'Speak (Voice)' },
-  { key: 'Stream',                  label: 'Stream / Go Live (Voice)' },
-  { key: 'UseEmbeddedActivities',   label: 'Use Activities (Voice)' },
+  // ── General ──
+  { key: 'ViewChannel',               label: '👁️  View Channel',                  group: 'General' },
+  { key: 'ManageChannels',            label: '🔧 Manage Channels',                group: 'General' },
+  { key: 'ManageRoles',               label: '🎭 Manage Roles (Channel Perms)',   group: 'General' },
+  { key: 'ManageWebhooks',            label: '🪝 Manage Webhooks',                group: 'General' },
+  { key: 'CreateInvite',              label: '✉️  Create Invite',                  group: 'General' },
+  // ── Text ──
+  { key: 'SendMessages',              label: '💬 Send Messages',                  group: 'Text' },
+  { key: 'SendMessagesInThreads',     label: '🧵 Send Messages in Threads',       group: 'Text' },
+  { key: 'CreatePublicThreads',       label: '🧵 Create Public Threads',          group: 'Text' },
+  { key: 'CreatePrivateThreads',      label: '🔒 Create Private Threads',         group: 'Text' },
+  { key: 'ManageMessages',            label: '🗑️  Manage Messages',                group: 'Text' },
+  { key: 'ManageThreads',             label: '🗑️  Manage Threads',                 group: 'Text' },
+  { key: 'ReadMessageHistory',        label: '📜 Read Message History',           group: 'Text' },
+  { key: 'AddReactions',              label: '😀 Add Reactions',                  group: 'Text' },
+  { key: 'UseExternalEmojis',         label: '🌐 Use External Emojis',            group: 'Text' },
+  { key: 'UseExternalStickers',       label: '🌐 Use External Stickers',          group: 'Text' },
+  { key: 'MentionEveryone',           label: '📢 Mention @everyone / @here',      group: 'Text' },
+  { key: 'EmbedLinks',                label: '🔗 Embed Links',                    group: 'Text' },
+  { key: 'AttachFiles',               label: '📎 Attach Files',                   group: 'Text' },
+  { key: 'UseApplicationCommands',    label: '🤖 Use Application Commands',       group: 'Text' },
+  { key: 'SendTTSMessages',           label: '🔊 Send TTS Messages',              group: 'Text' },
+  // ── Moderation ──
+  { key: 'KickMembers',               label: '👢 Kick Members',                   group: 'Moderation' },
+  { key: 'BanMembers',                label: '🔨 Ban Members',                    group: 'Moderation' },
+  { key: 'ModerateMembers',           label: '⏱️  Timeout Members',               group: 'Moderation' },
+  { key: 'ViewAuditLog',              label: '📋 View Audit Log',                 group: 'Moderation' },
+  // ── Voice ──
+  { key: 'Connect',                   label: '🎙️  Connect',                        group: 'Voice' },
+  { key: 'Speak',                     label: '🔊 Speak',                          group: 'Voice' },
+  { key: 'Stream',                    label: '🎥 Stream / Go Live',               group: 'Voice' },
+  { key: 'UseEmbeddedActivities',     label: '🎮 Use Activities',                 group: 'Voice' },
+  { key: 'UseVAD',                    label: '🎤 Use Voice Activity (no PTT)',     group: 'Voice' },
+  { key: 'PrioritySpeaker',           label: '⭐ Priority Speaker',               group: 'Voice' },
+  { key: 'MuteMembers',               label: '🔇 Mute Members',                   group: 'Voice' },
+  { key: 'DeafenMembers',             label: '🙉 Deafen Members',                 group: 'Voice' },
+  { key: 'MoveMembers',               label: '↔️  Move Members',                   group: 'Voice' },
 ];
 
 function loadCategoryPermsConfig() {
@@ -3268,16 +3294,24 @@ app.get('/category-perms', (req, res) => {
     .map((r) => `<label class="check-item"><input type="checkbox" name="roleIds" value="${r.id}"> ${escapeHtml(r.name)}</label>`)
     .join('') || '<p class="muted">No roles found.</p>';
 
-  // Build the permission rows for the template builder
-  const permRows = MANAGED_PERMS.map((p) => `
-    <tr>
-      <td style="font-size:13px;">${escapeHtml(p.label)}</td>
-      <td><select name="perm_${p.key}" style="width:100%;">
-        <option value="neutral">— Inherit —</option>
-        <option value="allow">✅ Allow</option>
-        <option value="deny">❌ Deny</option>
-      </select></td>
-    </tr>`).join('');
+  // Build the permission rows for the template builder, grouped by section
+  const permRows = (() => {
+    const groups = [...new Set(MANAGED_PERMS.map((p) => p.group))];
+    return groups.map((g) => {
+      const groupPerms = MANAGED_PERMS.filter((p) => p.group === g);
+      const header = `<tr><td colspan="2" style="padding-top:12px;padding-bottom:4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-dim);border-bottom:1px solid var(--panel-border);">${escapeHtml(g)}</td></tr>`;
+      const rows = groupPerms.map((p) => `
+        <tr>
+          <td style="font-size:13px;padding-left:8px;">${escapeHtml(p.label)}</td>
+          <td><select name="perm_${p.key}" style="width:100%;">
+            <option value="neutral">— Inherit —</option>
+            <option value="allow">✅ Allow</option>
+            <option value="deny">❌ Deny</option>
+          </select></td>
+        </tr>`).join('');
+      return header + rows;
+    }).join('');
+  })();
 
   // Build the saved templates list
   const templatesList = cfg.templates.length
@@ -3384,15 +3418,23 @@ app.get('/category-perms', (req, res) => {
         <h3 style="margin-top:8px;">Permissions for this role</h3>
         <table style="max-width:500px;">
           <thead><tr><th>Permission</th><th>Value</th></tr></thead>
-          <tbody>${MANAGED_PERMS.map((p) => `
-            <tr>
-              <td style="font-size:13px;">${escapeHtml(p.label)}</td>
-              <td><select name="perm_${p.key}" style="width:100%;">
-                <option value="neutral">— Inherit —</option>
-                <option value="allow">✅ Allow</option>
-                <option value="deny">❌ Deny</option>
-              </select></td>
-            </tr>`).join('')}</tbody>
+          <tbody>${(() => {
+            const groups = [...new Set(MANAGED_PERMS.map((p) => p.group))];
+            return groups.map((g) => {
+              const groupPerms = MANAGED_PERMS.filter((p) => p.group === g);
+              const header = `<tr><td colspan="2" style="padding-top:12px;padding-bottom:4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-dim);border-bottom:1px solid var(--panel-border);">${escapeHtml(g)}</td></tr>`;
+              const rows = groupPerms.map((p) => `
+                <tr>
+                  <td style="font-size:13px;padding-left:8px;">${escapeHtml(p.label)}</td>
+                  <td><select name="perm_${p.key}" style="width:100%;">
+                    <option value="neutral">— Inherit —</option>
+                    <option value="allow">✅ Allow</option>
+                    <option value="deny">❌ Deny</option>
+                  </select></td>
+                </tr>`).join('');
+              return header + rows;
+            }).join('');
+          })()}</tbody>
         </table>
         <div class="btn-row"><button type="submit">➕ Add Role to Template</button></div>
       </form>
