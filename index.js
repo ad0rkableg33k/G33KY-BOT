@@ -1431,6 +1431,7 @@ async function applyCategoryPermsTemplate(guild, template, categoryIds, cascade)
         await category.permissionOverwrites.edit(rolePerms.roleId, overwrite);
         updated++;
       } catch (err) {
+        console.error(`[category-perms] Failed on category #${category.name} (${catId}) for role ${rolePerms.roleId}:`, err.message);
         failed.push({ id: catId, name: category.name, error: err.message });
       }
 
@@ -1441,6 +1442,7 @@ async function applyCategoryPermsTemplate(guild, template, categoryIds, cascade)
             await child.permissionOverwrites.edit(rolePerms.roleId, overwrite);
             updated++;
           } catch (err) {
+            console.error(`[category-perms] Failed on channel #${child.name} (${child.id}) for role ${rolePerms.roleId}:`, err.message);
             failed.push({ id: child.id, name: child.name, error: err.message });
           }
         }
