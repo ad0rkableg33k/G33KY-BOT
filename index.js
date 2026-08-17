@@ -990,7 +990,7 @@ client.on('interactionCreate', async (interaction) => {
       try {
         const role = await interaction.guild.roles.create({
           name: 'Camera Policy Exempt',
-          color: 0x3498db,
+          colors: [0x3498db],
           reason: 'Created via /setup — camera policy',
         });
         cfg.exemptRoles.push(role.id);
@@ -3363,7 +3363,94 @@ app.get('/category-perms', (req, res) => {
       </div>`).join('')
     : '<p class="muted">No templates saved yet — create one below.</p>';
 
+  // Permission bit map — matches MANAGED_PERMS keys to Discord's bitfield values
+  const PERM_BITS = {
+    CreateInstantInvite: 1n,
+    KickMembers: 2n,
+    BanMembers: 4n,
+    ManageChannels: 16n,
+    ManageRoles: 268435456n,
+    ManageWebhooks: 536870912n,
+    ViewChannel: 1024n,
+    SendMessages: 2048n,
+    SendTTSMessages: 4096n,
+    ManageMessages: 8192n,
+    EmbedLinks: 16384n,
+    AttachFiles: 32768n,
+    ReadMessageHistory: 65536n,
+    MentionEveryone: 131072n,
+    UseExternalEmojis: 262144n,
+    AddReactions: 64n,
+    Connect: 1048576n,
+    Speak: 2097152n,
+    MuteMembers: 4194304n,
+    DeafenMembers: 8388608n,
+    MoveMembers: 16777216n,
+    UseVAD: 33554432n,
+    PrioritySpeaker: 256n,
+    Stream: 512n,
+    ViewAuditLog: 128n,
+    ModerateMembers: 1099511627776n,
+    SendMessagesInThreads: 274877906944n,
+    CreatePublicThreads: 34359738368n,
+    CreatePrivateThreads: 68719476736n,
+    ManageThreads: 17179869184n,
+    UseExternalStickers: 137438953472n,
+    UseApplicationCommands: 2147483648n,
+    UseEmbeddedActivities: 549755813888n,
+  };
+
+  const permBitsJson = JSON.stringify(Object.fromEntries(Object.entries(PERM_BITS).map(([k,v]) => [k, v.toString()])));
+
   const body = `
+    <script>
+    const PERM_BITS = ${permBitsJson};
+
+    // Parse a permission integer and set all the dropdowns to allow/deny/neutral
+    function applyPermInt(formId, inputId) {
+      const raw = document.getElementById(inputId).value.trim();
+      if (!raw) return;
+      let val;
+      try { val = BigInt(raw); } catch(e) { alert('Invalid permission number — paste the integer from the Discord permission calculator.'); return; }
+
+      const form = document.getElementById(formId);
+      if (!form) return;
+      for (const [key, bit] of Object.entries(PERM_BITS)) {
+        const sel = form.querySelector('select[name="perm_' + key + '"]');
+        if (!sel) continue;
+        sel.value = (val & BigInt(bit)) !== 0n ? 'allow' : 'neutral';
+      }
+    }
+
+    // Live permission calculator — reads all dropdowns and computes the integer
+    function calcPermInt(formId, outputId) {
+      const form = document.getElementById(formId);
+      if (!form) return;
+      let allow = 0n;
+      for (const [key, bit] of Object.entries(PERM_BITS)) {
+        const sel = form.querySelector('select[name="perm_' + key + '"]');
+        if (sel && sel.value === 'allow') allow |= BigInt(bit);
+      }
+      const el = document.getElementById(outputId);
+      if (el) el.textContent = allow.toString();
+    }
+
+    // Wire up live recalc on all perm selects in a form
+    function wireCalc(formId, outputId) {
+      const form = document.getElementById(formId);
+      if (!form) return;
+      form.querySelectorAll('select[name^="perm_"]').forEach(sel => {
+        sel.addEventListener('change', () => calcPermInt(formId, outputId));
+      });
+      calcPermInt(formId, outputId);
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      wireCalc('form-new-template', 'calc-new');
+      wireCalc('form-add-role', 'calc-add');
+    });
+    </script>
+
     <div class="card">
       <h2>🔐 Category Permissions — ${escapeHtml(guild.name)}</h2>
       <p class="muted">Build reusable permission templates, then bulk-apply them to categories (and optionally their channels) in one action. Great for keeping bot access, staff roles, and verified member perms uniform across all categories.</p>
@@ -3376,13 +3463,13 @@ app.get('/category-perms', (req, res) => {
 
     <div class="card">
       <h3>Create New Template</h3>
-      <form method="POST" action="/category-perms/save-template">
+      <form method="POST" action="/category-perms/save-template" id="form-new-template">
         <input type="hidden" name="guild" value="${guildId}">
         <div class="field" style="margin-bottom:14px;">
           <label>Template name</label>
           <input type="text" name="templateName" placeholder="e.g. Staff Roles, Verified Members, Bots" style="max-width:400px;" required>
         </div>
-        <p class="muted" style="margin-bottom:10px;">Add roles one at a time — save the template first with one role, then edit to add more (or add them all now by submitting once per role).</p>
+        <p class="muted" style="margin-bottom:10px;">Add roles one at a time — save the template first with one role, then edit to add more.</p>
         <div class="field" style="margin-bottom:14px;">
           <label>Role</label>
           <select name="roleId" style="max-width:400px;">
@@ -3390,6 +3477,17 @@ app.get('/category-perms', (req, res) => {
             ${roleOptions}
           </select>
         </div>
+
+        <div style="background:#0d0d14;border:1px solid var(--panel-border);border-radius:10px;padding:16px;margin-bottom:16px;">
+          <h3 style="margin-top:0;">⚡ Permission Calculator</h3>
+          <p class="muted" style="margin-bottom:10px;">Paste a permission integer to auto-fill the dropdowns below — or use the <a href="https://discordapi.com/permissions.html" target="_blank" rel="noopener">Discord Permission Calculator ↗</a> to build one. The number below updates live as you change dropdowns.</p>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <input type="text" id="perm-int-new" placeholder="e.g. 8 for Admin, 3072 for Send+View..." style="max-width:320px;font-family:monospace;">
+            <button type="button" onclick="applyPermInt('form-new-template','perm-int-new')" class="secondary">⚡ Apply to dropdowns</button>
+            <span class="muted" style="font-size:12px;">Current value: <code id="calc-new" style="font-size:13px;color:var(--accent);">0</code></span>
+          </div>
+        </div>
+
         <h3 style="margin-top:8px;">Permissions for this role</h3>
         <table style="max-width:500px;">
           <thead><tr><th>Permission</th><th>Value</th></tr></thead>
@@ -3401,7 +3499,7 @@ app.get('/category-perms', (req, res) => {
 
     <div class="card">
       <h3>Add Role to Existing Template</h3>
-      <form method="POST" action="/category-perms/add-role-to-template">
+      <form method="POST" action="/category-perms/add-role-to-template" id="form-add-role">
         <input type="hidden" name="guild" value="${guildId}">
         <div class="row">
           <div class="field">
@@ -3418,6 +3516,17 @@ app.get('/category-perms', (req, res) => {
             </select>
           </div>
         </div>
+
+        <div style="background:#0d0d14;border:1px solid var(--panel-border);border-radius:10px;padding:16px;margin-bottom:16px;">
+          <h3 style="margin-top:0;">⚡ Permission Calculator</h3>
+          <p class="muted" style="margin-bottom:10px;">Paste a permission integer to auto-fill the dropdowns — or use the <a href="https://discordapi.com/permissions.html" target="_blank" rel="noopener">Discord Permission Calculator ↗</a>. The number below updates live as you change dropdowns.</p>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <input type="text" id="perm-int-add" placeholder="e.g. 8 for Admin, 3072 for Send+View..." style="max-width:320px;font-family:monospace;">
+            <button type="button" onclick="applyPermInt('form-add-role','perm-int-add')" class="secondary">⚡ Apply to dropdowns</button>
+            <span class="muted" style="font-size:12px;">Current value: <code id="calc-add" style="font-size:13px;color:var(--accent);">0</code></span>
+          </div>
+        </div>
+
         <h3 style="margin-top:8px;">Permissions for this role</h3>
         <table style="max-width:500px;">
           <thead><tr><th>Permission</th><th>Value</th></tr></thead>
