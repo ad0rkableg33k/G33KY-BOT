@@ -49,6 +49,7 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  MessageFlags,
 } = require('discord.js');
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -643,10 +644,10 @@ async function handleReactivateButton(interaction) {
     if (config.activeRoleId && !member.roles.cache.has(config.activeRoleId)) {
       await member.roles.add(config.activeRoleId);
     }
-    await interaction.reply({ content: "Welcome back! You've been reactivated — full access restored.", ephemeral: true });
+    await interaction.reply({ content: "Welcome back! You've been reactivated — full access restored.", flags: MessageFlags.Ephemeral });
   } catch (err) {
     console.error('Reactivation failed:', err);
-    await interaction.reply({ content: 'Something went wrong reactivating you — ping a mod for help.', ephemeral: true });
+    await interaction.reply({ content: 'Something went wrong reactivating you — ping a mod for help.', flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -883,7 +884,7 @@ function buildActivityChannelsMenuMessage(guildId) {
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand() && interaction.commandName === 'setup') {
-      return interaction.reply({ ...buildMainMenuMessage(), ephemeral: true });
+      return interaction.reply({ ...buildMainMenuMessage(), flags: MessageFlags.Ephemeral });
     }
 
     if (!interaction.customId || !interaction.customId.startsWith('setup:')) return;
@@ -906,7 +907,7 @@ client.on('interactionCreate', async (interaction) => {
       if (choice === 'camera') return interaction.update(buildCameraMenuMessage(guildId));
       if (choice === 'activity') return interaction.update(buildActivityMenuMessage(guildId));
       if (choice === 'catperms') {
-        return interaction.reply({ content: '🔐 **Category Permissions** is managed from the web dashboard — head to the **Category Perms** tab to build templates and apply them! You can also use `/category-perms apply`, `/category-perms unsync`, and `/category-perms list-templates` from Discord directly.', ephemeral: true });
+        return interaction.reply({ content: '🔐 **Category Permissions** is managed from the web dashboard — head to the **Category Perms** tab to build templates and apply them! You can also use `/category-perms apply`, `/category-perms unsync`, and `/category-perms list-templates` from Discord directly.', flags: MessageFlags.Ephemeral });
       }
       return;
     }
@@ -925,7 +926,7 @@ client.on('interactionCreate', async (interaction) => {
       if (!saved) {
         await interaction.followUp({
           content: "⚠️ This didn't save to disk — it'll revert if the bot restarts. Check Railway logs for a DATA_DIR write error.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
       return;
@@ -975,7 +976,7 @@ client.on('interactionCreate', async (interaction) => {
       const grace = parseInt(interaction.fields.getTextInputValue('grace'), 10);
       const warning = parseInt(interaction.fields.getTextInputValue('warning'), 10);
       if (!Number.isInteger(grace) || !Number.isInteger(warning) || grace < 0 || warning < 1) {
-        return interaction.reply({ content: '❌ Grace must be 0+ and warning must be 1+ (whole numbers, in minutes).', ephemeral: true });
+        return interaction.reply({ content: '❌ Grace must be 0+ and warning must be 1+ (whole numbers, in minutes).', flags: MessageFlags.Ephemeral });
       }
       const cfg = ensureGuildConfig(guildId);
       cfg.graceMinutes = grace;
@@ -999,7 +1000,7 @@ client.on('interactionCreate', async (interaction) => {
         console.error('Failed to create camera exempt role:', err.message);
         await interaction.reply({
           content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
       return;
@@ -1008,7 +1009,7 @@ client.on('interactionCreate', async (interaction) => {
     if (id === 'setup:camera:announce-post') {
       const cfg = ensureGuildConfig(guildId);
       if (!cfg.announcementChannelId) {
-        return interaction.reply({ content: '❌ Pick an announcement channel below first.', ephemeral: true });
+        return interaction.reply({ content: '❌ Pick an announcement channel below first.', flags: MessageFlags.Ephemeral });
       }
       const defaultText =
         'Cameras must be ON while in monitored voice channels.\n\n' +
@@ -1041,7 +1042,7 @@ client.on('interactionCreate', async (interaction) => {
         console.error('Failed to post camera policy announcement:', err.message);
         await interaction.reply({
           content: `❌ Couldn't post that — make sure I can send messages and embed links in that channel. (${err.message})`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
       return;
@@ -1051,7 +1052,7 @@ client.on('interactionCreate', async (interaction) => {
     if (id === 'setup:activity:toggle') {
       const cfg = ensureActivityGuildConfig(guildId);
       if (!cfg.enabled && (!cfg.activeRoleId || !cfg.inactiveRoleId)) {
-        return interaction.reply({ content: '❌ Pick both an Active role and an Inactive role in the Roles page before turning this on.', ephemeral: true });
+        return interaction.reply({ content: '❌ Pick both an Active role and an Inactive role in the Roles page before turning this on.', flags: MessageFlags.Ephemeral });
       }
       cfg.enabled = !cfg.enabled;
       const saved = saveActivityConfig(activityConfig);
@@ -1060,7 +1061,7 @@ client.on('interactionCreate', async (interaction) => {
       if (!saved) {
         await interaction.followUp({
           content: "⚠️ This didn't save to disk — it'll revert if the bot restarts. Check Railway logs for a DATA_DIR write error.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
       return;
@@ -1100,19 +1101,19 @@ client.on('interactionCreate', async (interaction) => {
       const retention = parseInt(interaction.fields.getTextInputValue('retention'), 10);
       const voiceMinutes = parseInt(interaction.fields.getTextInputValue('voiceMinutes'), 10);
       if (!Number.isInteger(days) || days < 1) {
-        return interaction.reply({ content: '❌ Threshold must be a whole number of days, 1 or more.', ephemeral: true });
+        return interaction.reply({ content: '❌ Threshold must be a whole number of days, 1 or more.', flags: MessageFlags.Ephemeral });
       }
       if (!Number.isInteger(retention) || retention < 1) {
-        return interaction.reply({ content: '❌ Retention must be a whole number of days, 1 or more.', ephemeral: true });
+        return interaction.reply({ content: '❌ Retention must be a whole number of days, 1 or more.', flags: MessageFlags.Ephemeral });
       }
       if (retention < days) {
         return interaction.reply({
           content: `❌ Retention (${retention} days) can't be shorter than the threshold (${days} days) — that would delete activity records before they're used to decide Active/Inactive.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
       if (!Number.isInteger(voiceMinutes) || voiceMinutes < 1) {
-        return interaction.reply({ content: '❌ Voice minutes must be a whole number, 1 or more.', ephemeral: true });
+        return interaction.reply({ content: '❌ Voice minutes must be a whole number, 1 or more.', flags: MessageFlags.Ephemeral });
       }
       const cfg = ensureActivityGuildConfig(guildId);
       cfg.thresholdDays = days;
@@ -1125,12 +1126,12 @@ client.on('interactionCreate', async (interaction) => {
     if (id === 'setup:activity:postbutton') {
       const cfg = ensureActivityGuildConfig(guildId);
       if (!cfg.quarantineChannelId) {
-        return interaction.reply({ content: '❌ Pick a quarantine channel in the Channels page first.', ephemeral: true });
+        return interaction.reply({ content: '❌ Pick a quarantine channel in the Channels page first.', flags: MessageFlags.Ephemeral });
       }
       const channel = await interaction.guild.channels.fetch(cfg.quarantineChannelId);
       const { embed: btnEmbed, row: btnRow } = buildReactivationEmbedAndRow();
       await channel.send({ embeds: [btnEmbed], components: [btnRow] });
-      return interaction.reply({ content: `✅ Reactivation button posted in **#${channel.name}**.`, ephemeral: true });
+      return interaction.reply({ content: `✅ Reactivation button posted in **#${channel.name}**.`, flags: MessageFlags.Ephemeral });
     }
 
     // ---- Activity tracker: roles page ----
@@ -1158,13 +1159,13 @@ client.on('interactionCreate', async (interaction) => {
     if (id === 'setup:activity:create-active-role') {
       const cfg = ensureActivityGuildConfig(guildId);
       try {
-        const role = await interaction.guild.roles.create({ name: 'Active Member', color: 0x00cc66, reason: 'Created via /setup — activity tracker' });
+        const role = await interaction.guild.roles.create({ name: 'Active Member', colors: [0x00cc66], reason: 'Created via /setup — activity tracker' });
         cfg.activeRoleId = role.id;
         saveActivityConfig(activityConfig);
         await interaction.update(buildActivityRolesMenuMessage(guildId));
       } catch (err) {
         console.error('Failed to create Active Member role:', err.message);
-        await interaction.reply({ content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`, ephemeral: true });
+        await interaction.reply({ content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`, flags: MessageFlags.Ephemeral });
       }
       return;
     }
@@ -1172,13 +1173,13 @@ client.on('interactionCreate', async (interaction) => {
     if (id === 'setup:activity:create-inactive-role') {
       const cfg = ensureActivityGuildConfig(guildId);
       try {
-        const role = await interaction.guild.roles.create({ name: 'Inactive Member', color: 0x999999, reason: 'Created via /setup — activity tracker' });
+        const role = await interaction.guild.roles.create({ name: 'Inactive Member', colors: [0x999999], reason: 'Created via /setup — activity tracker' });
         cfg.inactiveRoleId = role.id;
         saveActivityConfig(activityConfig);
         await interaction.update(buildActivityRolesMenuMessage(guildId));
       } catch (err) {
         console.error('Failed to create Inactive Member role:', err.message);
-        await interaction.reply({ content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`, ephemeral: true });
+        await interaction.reply({ content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`, flags: MessageFlags.Ephemeral });
       }
       return;
     }
@@ -1186,13 +1187,13 @@ client.on('interactionCreate', async (interaction) => {
     if (id === 'setup:activity:create-exempt-role') {
       const cfg = ensureActivityGuildConfig(guildId);
       try {
-        const role = await interaction.guild.roles.create({ name: 'Activity Tracker Exempt', color: 0x3498db, reason: 'Created via /setup — activity tracker' });
+        const role = await interaction.guild.roles.create({ name: 'Activity Tracker Exempt', colors: [0x3498db], reason: 'Created via /setup — activity tracker' });
         cfg.exemptRoleIds.push(role.id);
         saveActivityConfig(activityConfig);
         await interaction.update(buildActivityRolesMenuMessage(guildId));
       } catch (err) {
         console.error('Failed to create activity exempt role:', err.message);
-        await interaction.reply({ content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`, ephemeral: true });
+        await interaction.reply({ content: `❌ Couldn't create that role — make sure I have the **Manage Roles** permission. (${err.message})`, flags: MessageFlags.Ephemeral });
       }
       return;
     }
@@ -1235,12 +1236,12 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.followUp({
             content:
               "⚠️ Created #re-activate, but you haven't set your Inactive role yet — set it in the Roles page, then re-run this so I can grant it access to this channel.",
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
       } catch (err) {
         console.error('Failed to create reactivation channel:', err.message);
-        await interaction.reply({ content: `❌ Couldn't create that channel — make sure I have the **Manage Channels** permission. (${err.message})`, ephemeral: true });
+        await interaction.reply({ content: `❌ Couldn't create that channel — make sure I have the **Manage Channels** permission. (${err.message})`, flags: MessageFlags.Ephemeral });
       }
       return;
     }
@@ -1249,14 +1250,14 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferUpdate(); // this can take a few seconds on a server with many channels
       const result = await applyInactiveChannelRestrictions(interaction.guild);
       if (!result.success) {
-        await interaction.followUp({ content: `❌ ${result.reason}`, ephemeral: true });
+        await interaction.followUp({ content: `❌ ${result.reason}`, flags: MessageFlags.Ephemeral });
         return;
       }
       await interaction.editReply(buildActivityChannelsMenuMessage(guildId));
       const failedNote = result.failed.length > 0 ? `\n⚠️ Failed on ${result.failed.length} channel(s) — check the bot has **Manage Roles** and can see those channels.` : '';
       await interaction.followUp({
         content: `🔒 Applied to **${result.updated}** channel(s). Inactive is now locked out everywhere except the quarantine channel, and any channel created from now on will be locked down automatically.${failedNote}`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -1264,9 +1265,9 @@ client.on('interactionCreate', async (interaction) => {
     console.error('Error handling /setup interaction:', err);
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({ content: 'Something went wrong — check the terminal for details.', ephemeral: true });
+        await interaction.followUp({ content: 'Something went wrong — check the terminal for details.', flags: MessageFlags.Ephemeral });
       } else {
-        await interaction.reply({ content: 'Something went wrong — check the terminal for details.', ephemeral: true });
+        await interaction.reply({ content: 'Something went wrong — check the terminal for details.', flags: MessageFlags.Ephemeral });
       }
     } catch (followUpErr) {
       console.error('Could not send setup error response:', followUpErr.message);
@@ -1344,7 +1345,7 @@ const MANAGED_PERMS = [
   { key: 'ManageChannels',            label: '🔧 Manage Channels',                group: 'General' },
   { key: 'ManageRoles',               label: '🎭 Manage Roles (Channel Perms)',   group: 'General' },
   { key: 'ManageWebhooks',            label: '🪝 Manage Webhooks',                group: 'General' },
-  { key: 'CreateInvite',              label: '✉️  Create Invite',                  group: 'General' },
+  { key: 'CreateInstantInvite',        label: '✉️  Create Invite',                  group: 'General' },
   // ── Text ──
   { key: 'SendMessages',              label: '💬 Send Messages',                  group: 'Text' },
   { key: 'SendMessagesInThreads',     label: '🧵 Send Messages in Threads',       group: 'Text' },
@@ -1836,7 +1837,7 @@ client.on('interactionCreate', async (interaction) => {
 
   try {
     if (interaction.commandName === 'export-channels') {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const data = exportToFile(interaction.guild);
       await interaction.editReply({
         content: `Exported ${data.length} channels.`,
@@ -1948,7 +1949,7 @@ client.on('interactionCreate', async (interaction) => {
           },
           { name: 'Announcement link', value: cfg.announcementUrl ? cfg.announcementUrl : 'Not set' }
         );
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'camera-monitor') {
@@ -1958,9 +1959,9 @@ client.on('interactionCreate', async (interaction) => {
       if (sub === 'add') {
         const channel = interaction.options.getChannel('channel');
         if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildStageVoice) {
-          await interaction.reply({ content: '❌ That needs to be a voice channel.', ephemeral: true });
+          await interaction.reply({ content: '❌ That needs to be a voice channel.', flags: MessageFlags.Ephemeral });
         } else if (guildConfig.monitoredChannels.includes(channel.id)) {
-          await interaction.reply({ content: `**#${channel.name}** is already being monitored.`, ephemeral: true });
+          await interaction.reply({ content: `**#${channel.name}** is already being monitored.`, flags: MessageFlags.Ephemeral });
         } else {
           guildConfig.monitoredChannels.push(channel.id);
           saveCameraConfig(cameraConfig);
@@ -1969,7 +1970,7 @@ client.on('interactionCreate', async (interaction) => {
       } else if (sub === 'remove') {
         const channel = interaction.options.getChannel('channel');
         if (!guildConfig.monitoredChannels.includes(channel.id)) {
-          await interaction.reply({ content: `**#${channel.name}** wasn't being monitored.`, ephemeral: true });
+          await interaction.reply({ content: `**#${channel.name}** wasn't being monitored.`, flags: MessageFlags.Ephemeral });
         } else {
           guildConfig.monitoredChannels = guildConfig.monitoredChannels.filter((id) => id !== channel.id);
           saveCameraConfig(cameraConfig);
@@ -1977,10 +1978,10 @@ client.on('interactionCreate', async (interaction) => {
         }
       } else if (sub === 'list') {
         if (guildConfig.monitoredChannels.length === 0) {
-          await interaction.reply({ content: 'No voice channels are currently being monitored in this server.', ephemeral: true });
+          await interaction.reply({ content: 'No voice channels are currently being monitored in this server.', flags: MessageFlags.Ephemeral });
         } else {
           const list = guildConfig.monitoredChannels.map((id) => `<#${id}>`).join('\n');
-          await interaction.reply({ content: `**Monitored voice channels:**\n${list}`, ephemeral: true });
+          await interaction.reply({ content: `**Monitored voice channels:**\n${list}`, flags: MessageFlags.Ephemeral });
         }
       }
     }
@@ -1992,7 +1993,7 @@ client.on('interactionCreate', async (interaction) => {
       if (sub === 'add') {
         const role = interaction.options.getRole('role');
         if (guildConfig.exemptRoles.includes(role.id)) {
-          await interaction.reply({ content: `**${role.name}** is already exempt.`, ephemeral: true });
+          await interaction.reply({ content: `**${role.name}** is already exempt.`, flags: MessageFlags.Ephemeral });
         } else {
           guildConfig.exemptRoles.push(role.id);
           saveCameraConfig(cameraConfig);
@@ -2001,7 +2002,7 @@ client.on('interactionCreate', async (interaction) => {
       } else if (sub === 'remove') {
         const role = interaction.options.getRole('role');
         if (!guildConfig.exemptRoles.includes(role.id)) {
-          await interaction.reply({ content: `**${role.name}** wasn't exempt.`, ephemeral: true });
+          await interaction.reply({ content: `**${role.name}** wasn't exempt.`, flags: MessageFlags.Ephemeral });
         } else {
           guildConfig.exemptRoles = guildConfig.exemptRoles.filter((id) => id !== role.id);
           saveCameraConfig(cameraConfig);
@@ -2009,10 +2010,10 @@ client.on('interactionCreate', async (interaction) => {
         }
       } else if (sub === 'list') {
         if (guildConfig.exemptRoles.length === 0) {
-          await interaction.reply({ content: 'No roles are currently exempt in this server.', ephemeral: true });
+          await interaction.reply({ content: 'No roles are currently exempt in this server.', flags: MessageFlags.Ephemeral });
         } else {
           const list = guildConfig.exemptRoles.map((id) => `<@&${id}>`).join('\n');
-          await interaction.reply({ content: `**Exempt roles:**\n${list}`, ephemeral: true });
+          await interaction.reply({ content: `**Exempt roles:**\n${list}`, flags: MessageFlags.Ephemeral });
         }
       }
     }
@@ -2034,7 +2035,7 @@ client.on('interactionCreate', async (interaction) => {
         const { graceMinutes, warningMinutes } = getTiming(interaction.guildId);
         await interaction.reply({
           content: `**Grace period:** ${graceMinutes} minute(s)\n**Warning period:** ${warningMinutes} minute(s)\n**Total time before removal:** ${graceMinutes + warningMinutes} minute(s)`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     }
@@ -2055,7 +2056,7 @@ client.on('interactionCreate', async (interaction) => {
       } else if (sub === 'view') {
         await interaction.reply({
           content: guildConfig.announcementUrl ? `Current announcement link:\n${guildConfig.announcementUrl}` : 'No announcement link is set for this server.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     }
@@ -2069,7 +2070,7 @@ client.on('interactionCreate', async (interaction) => {
         if (sub === 'add') {
           const role = interaction.options.getRole('role');
           if (guildConfig.exemptRoleIds.includes(role.id)) {
-            await interaction.reply({ content: `**${role.name}** is already exempt.`, ephemeral: true });
+            await interaction.reply({ content: `**${role.name}** is already exempt.`, flags: MessageFlags.Ephemeral });
           } else {
             guildConfig.exemptRoleIds.push(role.id);
             saveActivityConfig(activityConfig);
@@ -2082,14 +2083,14 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply(`✅ **${role.name}** is no longer exempt.`);
         } else if (sub === 'list') {
           const list = guildConfig.exemptRoleIds.length ? guildConfig.exemptRoleIds.map((id) => `<@&${id}>`).join('\n') : 'None set.';
-          await interaction.reply({ content: `**Exempt roles:**\n${list}`, ephemeral: true });
+          await interaction.reply({ content: `**Exempt roles:**\n${list}`, flags: MessageFlags.Ephemeral });
         }
         return;
       }
 
       if (sub === 'enable') {
         if (!guildConfig.activeRoleId || !guildConfig.inactiveRoleId) {
-          await interaction.reply({ content: '❌ Set your roles first with `/activity-tracker set-roles`.', ephemeral: true });
+          await interaction.reply({ content: '❌ Set your roles first with `/activity-tracker set-roles`.', flags: MessageFlags.Ephemeral });
         } else {
           guildConfig.enabled = true;
           saveActivityConfig(activityConfig);
@@ -2122,7 +2123,7 @@ client.on('interactionCreate', async (interaction) => {
         if (days < guildConfig.thresholdDays) {
           await interaction.reply({
             content: `❌ Retention (${days} days) can't be shorter than your inactivity threshold (${guildConfig.thresholdDays} days) — that would delete activity records before they've even been used to decide Active/Inactive.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         } else {
           guildConfig.retentionDays = days;
@@ -2133,7 +2134,7 @@ client.on('interactionCreate', async (interaction) => {
         const pruned = pruneActivityData(interaction.guildId);
         await interaction.reply({
           content: pruned > 0 ? `✅ Purged **${pruned}** stale activity record(s) for this server.` : '✅ Nothing to purge — no records here are past the retention window.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       } else if (sub === 'set-quarantine-channel') {
         const channel = interaction.options.getChannel('channel');
@@ -2144,15 +2145,15 @@ client.on('interactionCreate', async (interaction) => {
         );
       } else if (sub === 'post-button') {
         if (!guildConfig.quarantineChannelId) {
-          await interaction.reply({ content: '❌ Set a quarantine channel first with `/activity-tracker set-quarantine-channel`.', ephemeral: true });
+          await interaction.reply({ content: '❌ Set a quarantine channel first with `/activity-tracker set-quarantine-channel`.', flags: MessageFlags.Ephemeral });
         } else {
           const channel = await interaction.guild.channels.fetch(guildConfig.quarantineChannelId);
           const { embed, row } = buildReactivationEmbedAndRow();
           await channel.send({ embeds: [embed], components: [row] });
-          await interaction.reply({ content: `✅ Button posted in **#${channel.name}**.`, ephemeral: true });
+          await interaction.reply({ content: `✅ Button posted in **#${channel.name}**.`, flags: MessageFlags.Ephemeral });
         }
       } else if (sub === 'apply-restrictions') {
-        await interaction.deferReply({ ephemeral: true }); // this can take a few seconds on a large server
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }); // this can take a few seconds on a large server
         const result = await applyInactiveChannelRestrictions(interaction.guild);
         if (!result.success) {
           await interaction.editReply(`❌ ${result.reason}`);
@@ -2193,7 +2194,7 @@ client.on('interactionCreate', async (interaction) => {
               value: `${storedRecordCount} member(s) — automatically deleted after ${guildConfig.retentionDays ?? DEFAULT_RETENTION_DAYS} day(s) of inactivity`,
             }
           );
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       } else if (sub === 'check') {
         const user = interaction.options.getUser('user');
         const member = await interaction.guild.members.fetch(user.id);
@@ -2209,7 +2210,7 @@ client.on('interactionCreate', async (interaction) => {
             `Last voice activity: ${lastVoiceActiveAt ? `<t:${Math.floor(lastVoiceActiveAt / 1000)}:R>` : 'never recorded'}\n` +
             `Effectively last active: ${daysSince} day(s) ago\n` +
             `Currently: ${daysSince <= guildConfig.thresholdDays ? '🟢 Active' : '🔴 Inactive'}`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     }
@@ -2220,21 +2221,21 @@ client.on('interactionCreate', async (interaction) => {
 
       if (sub === 'list-templates') {
         if (!guildCfg.templates.length) {
-          return interaction.reply({ content: 'No templates saved yet. Create them from the dashboard at `/category-perms` page.', ephemeral: true });
+          return interaction.reply({ content: 'No templates saved yet. Create them from the dashboard at `/category-perms` page.', flags: MessageFlags.Ephemeral });
         }
         const list = guildCfg.templates.map((t, i) => `**${i + 1}. ${t.name}** — ${t.rolePerms.length} role(s)`).join('\n');
-        return interaction.reply({ content: `**Saved templates:**\n${list}`, ephemeral: true });
+        return interaction.reply({ content: `**Saved templates:**\n${list}`, flags: MessageFlags.Ephemeral });
       }
 
       if (sub === 'apply') {
         const templateName = interaction.options.getString('template').trim();
         const template = guildCfg.templates.find((t) => t.name.toLowerCase() === templateName.toLowerCase());
         if (!template) {
-          return interaction.reply({ content: `❌ No template named **${templateName}** found. Use \`/category-perms list-templates\` to see what's saved.`, ephemeral: true });
+          return interaction.reply({ content: `❌ No template named **${templateName}** found. Use \`/category-perms list-templates\` to see what's saved.`, flags: MessageFlags.Ephemeral });
         }
         const categoryIds = interaction.options.getString('categories').split(',').map((s) => s.trim()).filter(Boolean);
         const cascade = interaction.options.getBoolean('cascade');
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const result = await applyCategoryPermsTemplate(interaction.guild, template, categoryIds, cascade);
         const failNote = result.failed.length ? `\n⚠️ Failed on ${result.failed.length} item(s) — check bot has Manage Roles & Manage Channels.` : '';
         return interaction.editReply(`✅ Applied template **${template.name}** to ${categoryIds.length} categor${categoryIds.length === 1 ? 'y' : 'ies'} — **${result.updated}** overwrite(s) updated.${cascade ? ' (cascaded to child channels)' : ''}${failNote}`);
@@ -2244,7 +2245,7 @@ client.on('interactionCreate', async (interaction) => {
         const roleIds = interaction.options.getString('roles').split(',').map((s) => s.trim()).filter(Boolean);
         const categoryIds = interaction.options.getString('categories').split(',').map((s) => s.trim()).filter(Boolean);
         const cascade = interaction.options.getBoolean('cascade');
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const result = await unsyncCategoryPerms(interaction.guild, roleIds, categoryIds, cascade);
         const failNote = result.failed.length ? `\n⚠️ Failed on ${result.failed.length} item(s) — check bot has Manage Roles & Manage Channels.` : '';
         return interaction.editReply(`✅ Removed overwrites for ${roleIds.length} role(s) from ${categoryIds.length} categor${categoryIds.length === 1 ? 'y' : 'ies'} — **${result.updated}** overwrite(s) cleared.${cascade ? ' (cascaded to child channels)' : ''}${failNote}`);
@@ -2337,7 +2338,7 @@ client.on('interactionCreate', async (interaction) => {
       } else {
         await interaction.reply({
           content: 'Something went wrong running that command — check the terminal for details.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     } catch (followUpErr) {
@@ -2911,7 +2912,7 @@ app.post('/camera/create-exempt-role', async (req, res) => {
   const guild = client.guilds.cache.get(guildId);
   const cfg = ensureGuildConfig(guildId);
   try {
-    const role = await guild.roles.create({ name: 'Camera Policy Exempt', color: 0x3498db, reason: 'Created via dashboard' });
+    const role = await guild.roles.create({ name: 'Camera Policy Exempt', colors: [0x3498db], reason: 'Created via dashboard' });
     cfg.exemptRoles.push(role.id);
     saveCameraConfig(cameraConfig);
     res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('Created role: ' + role.name)}`);
@@ -3104,14 +3105,14 @@ app.post('/activity/create-role', async (req, res) => {
   const guild = client.guilds.cache.get(guildId);
   const cfg = ensureActivityGuildConfig(guildId);
   const roleSpecs = {
-    active: { name: 'Active Member', color: 0x00cc66 },
-    inactive: { name: 'Inactive Member', color: 0x999999 },
-    exempt: { name: 'Activity Tracker Exempt', color: 0x3498db },
+    active: { name: 'Active Member', colors: [0x00cc66] },
+    inactive: { name: 'Inactive Member', colors: [0x999999] },
+    exempt: { name: 'Activity Tracker Exempt', colors: [0x3498db] },
   };
   const spec = roleSpecs[req.body.type];
   if (!spec) return res.redirect(`/activity?guild=${guildId}`);
   try {
-    const role = await guild.roles.create({ name: spec.name, color: spec.color, reason: 'Created via dashboard' });
+    const role = await guild.roles.create({ name: spec.name, colors: [spec.color], reason: 'Created via dashboard' });
     if (req.body.type === 'active') cfg.activeRoleId = role.id;
     else if (req.body.type === 'inactive') cfg.inactiveRoleId = role.id;
     else cfg.exemptRoleIds.push(role.id);
