@@ -1421,16 +1421,13 @@ async function applyCategoryPermsTemplate(guild, template, categoryIds, cascade)
       continue;
     }
 
-    // Ensure bot can see the category before trying to edit it
-    // Some channels have ViewChannel denied for @everyone with no bot overwrite,
-    // which causes "Missing Access" even with Manage Channels permission.
+    // Check bot can see the category — if not, skip it entirely.
+    // Explicitly locked channels should stay locked; we don't force our way in.
     const botMember = guild.members.me;
     if (botMember && !category.permissionsFor(botMember)?.has('ViewChannel')) {
-      try {
-        await category.permissionOverwrites.edit(botMember, { ViewChannel: true });
-      } catch (err) {
-        console.error(`[category-perms] Could not grant self-access to category #${category.name}:`, err.message);
-      }
+      console.warn(`[category-perms] Skipping category #${category.name} — bot does not have access (intentionally locked channel).`);
+      failed.push({ id: catId, name: category.name, error: 'Skipped — bot does not have ViewChannel access. Check if this channel should be in the template.' });
+      continue;
     }
 
     for (const rolePerms of template.rolePerms) {
@@ -1451,13 +1448,11 @@ async function applyCategoryPermsTemplate(guild, template, categoryIds, cascade)
       if (cascade) {
         const children = guild.channels.cache.filter((c) => c.parentId === catId && c.type !== ChannelType.GuildCategory);
         for (const child of children.values()) {
-          // Ensure bot can see the child channel too
+          // Skip channels the bot can't see — they're intentionally locked
           if (botMember && !child.permissionsFor(botMember)?.has('ViewChannel')) {
-            try {
-              await child.permissionOverwrites.edit(botMember, { ViewChannel: true });
-            } catch (err) {
-              console.error(`[category-perms] Could not grant self-access to channel #${child.name}:`, err.message);
-            }
+            console.warn(`[category-perms] Skipping channel #${child.name} — bot does not have access.`);
+            failed.push({ id: child.id, name: child.name, error: 'Skipped — bot does not have ViewChannel access.' });
+            continue;
           }
           try {
             await child.permissionOverwrites.edit(rolePerms.roleId, overwrite);
