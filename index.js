@@ -1421,6 +1421,18 @@ async function applyCategoryPermsTemplate(guild, template, categoryIds, cascade)
       continue;
     }
 
+    // Ensure bot can see the category before trying to edit it
+    // Some channels have ViewChannel denied for @everyone with no bot overwrite,
+    // which causes "Missing Access" even with Manage Channels permission.
+    const botMember = guild.members.me;
+    if (botMember && !category.permissionsFor(botMember)?.has('ViewChannel')) {
+      try {
+        await category.permissionOverwrites.edit(botMember, { ViewChannel: true });
+      } catch (err) {
+        console.error(`[category-perms] Could not grant self-access to category #${category.name}:`, err.message);
+      }
+    }
+
     for (const rolePerms of template.rolePerms) {
       const overwrite = {};
       for (const [perm, val] of Object.entries(rolePerms.perms)) {
@@ -1439,6 +1451,14 @@ async function applyCategoryPermsTemplate(guild, template, categoryIds, cascade)
       if (cascade) {
         const children = guild.channels.cache.filter((c) => c.parentId === catId && c.type !== ChannelType.GuildCategory);
         for (const child of children.values()) {
+          // Ensure bot can see the child channel too
+          if (botMember && !child.permissionsFor(botMember)?.has('ViewChannel')) {
+            try {
+              await child.permissionOverwrites.edit(botMember, { ViewChannel: true });
+            } catch (err) {
+              console.error(`[category-perms] Could not grant self-access to channel #${child.name}:`, err.message);
+            }
+          }
           try {
             await child.permissionOverwrites.edit(rolePerms.roleId, overwrite);
             updated++;
@@ -1802,7 +1822,7 @@ function loadDescriptions(guildId) {
   return loadAllDescriptions()[guildId] || {};
 }
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await registerCommands();
   seedCameraConfigIfNeeded();
