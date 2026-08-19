@@ -52,6 +52,15 @@ const {
   MessageFlags,
 } = require('discord.js');
 
+const {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  VoiceConnectionStatus,
+  entersState,
+} = require('@discordjs/voice');
+
 const TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID; // your primary server ID (used for startup convenience exports + seeding)
 
@@ -181,6 +190,129 @@ function seedCameraConfigIfNeeded() {
 
 const ACTIVITY_CONFIG_FILE = dataPath('activity-config.json');
 const ACTIVITY_DATA_FILE = dataPath('activity-data.json');
+const SAVED_ROLES_FILE = dataPath('saved-roles.json');
+
+function loadSavedRoles() {
+  try {
+    return JSON.parse(fs.readFileSync(SAVED_ROLES_FILE, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+function saveSavedRolesData(data) {
+  try {
+    fs.writeFileSync(SAVED_ROLES_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error(`Failed to save saved-roles.json:`, err.message);
+  }
+}
+let savedRolesData = loadSavedRoles();
+
+// ============================================================
+// VC Sound System — plays audio files when members join/leave VCs
+// Configurable per-member, per-server
+// ============================================================
+const VC_SOUND_CONFIG_FILE = dataPath('vc-sound-config.json');
+const VC_SOUNDS_DIR = dataPath('vc-sounds'); // folder where audio files are stored
+
+// Ensure the sounds directory exists
+if (!fs.existsSync(VC_SOUNDS_DIR)) fs.mkdirSync(VC_SOUNDS_DIR, { recursive: true });
+
+function loadVcSoundConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(VC_SOUND_CONFIG_FILE, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+function saveVcSoundConfig(data) {
+  try {
+    fs.writeFileSync(VC_SOUND_CONFIG_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error(`Failed to save vc-sound-config.json:`, err.message);
+  }
+}
+let vcSoundConfig = loadVcSoundConfig();
+
+function ensureVcSoundGuildConfig(guildId) {
+  if (!vcSoundConfig[guildId]) {
+    vcSoundConfig[guildId] = {
+      enabled: false,
+      defaultJoinSound: null,  // filename in vc-sounds/
+      defaultLeaveSound: null,
+      memberSounds: {},         // { userId: { join: filename, leave: filename } }
+    };
+    saveVcSoundConfig(vcSoundConfig);
+  }
+  return vcSoundConfig[guildId];
+}
+
+// Play a sound file in a voice channel, then disconnect
+async function playVcSound(guild, voiceChannelId, soundFile) {
+  if (!soundFile) return;
+  const fullPath = require('path').join(VC_SOUNDS_DIR, soundFile);
+  if (!fs.existsSync(fullPath)) {
+    console.warn(`[vc-sound] Sound file not found: ${fullPath}`);
+    return;
+  }
+
+  const channel = guild.channels.cache.get(voiceChannelId);
+  if (!channel || channel.type !== ChannelType.GuildVoice) return;
+
+  let connection;
+  try {
+    connection = joinVoiceChannel({
+      channelId: voiceChannelId,
+      guildId: guild.id,
+      adapterCreator: guild.voiceAdapterCreator,
+      selfDeaf: false,
+      selfMute: false,
+    });
+
+    await entersState(connection, VoiceConnectionStatus.Ready, 5000);
+
+    const player = createAudioPlayer();
+    const resource = createAudioResource(fullPath);
+    player.play(resource);
+    connection.subscribe(player);
+
+    await new Promise((resolve, reject) => {
+      player.once(AudioPlayerStatus.Idle, resolve);
+      player.once('error', reject);
+      setTimeout(resolve, 30000); // safety timeout — disconnect after 30s max
+    });
+  } catch (err) {
+    console.error(`[vc-sound] Failed to play sound in guild ${guild.id}:`, err.message);
+  } finally {
+    if (connection) connection.destroy();
+  }
+}
+
+// Voice state listener for join/leave sounds
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  const guild = newState.guild || oldState.guild;
+  if (!guild) return;
+  const cfg = ensureVcSoundGuildConfig(guild.id);
+  if (!cfg.enabled) return;
+
+  const userId = newState.member?.id || oldState.member?.id;
+  if (!userId) return;
+  if (newState.member?.user?.bot) return; // ignore bots
+
+  const memberSounds = cfg.memberSounds?.[userId] || {};
+
+  const joined = !oldState.channelId && newState.channelId;
+  const left = oldState.channelId && !newState.channelId;
+  const switched = oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId;
+
+  if (joined || switched) {
+    const sound = memberSounds.join || cfg.defaultJoinSound;
+    if (sound) await playVcSound(guild, newState.channelId, sound);
+  } else if (left) {
+    const sound = memberSounds.leave || cfg.defaultLeaveSound;
+    if (sound) await playVcSound(guild, oldState.channelId, sound);
+  }
+});
 const DEFAULT_THRESHOLD_DAYS = 30;
 const DEFAULT_RETENTION_DAYS = 90; // how long a raw activity timestamp is kept before being purged entirely
 const DEFAULT_VOICE_MINUTES_REQUIRED = 1; // continuous minutes in a single voice session before it counts as activity
@@ -211,6 +343,7 @@ function ensureActivityGuildConfig(guildId) {
       enabled: false,
       activeRoleId: null,
       inactiveRoleId: null,
+      verifiedRoleId: null,       // only assign Active if member has this role
       thresholdDays: DEFAULT_THRESHOLD_DAYS,
       quarantineChannelId: null,
       exemptRoleIds: [],
@@ -232,6 +365,9 @@ function ensureActivityGuildConfig(guildId) {
   }
   if (activityConfig[guildId].channelRestrictionsApplied === undefined) {
     activityConfig[guildId].channelRestrictionsApplied = false;
+  }
+  if (activityConfig[guildId].verifiedRoleId === undefined) {
+    activityConfig[guildId].verifiedRoleId = null;
   }
   return activityConfig[guildId];
 }
@@ -413,6 +549,9 @@ async function syncActivityRoles(guild) {
     if (member.user.bot) continue;
     if (config.exemptRoleIds.some((r) => member.roles.cache.has(r))) continue;
 
+    // Only track members who have the verified role (if one is configured)
+    if (config.verifiedRoleId && !member.roles.cache.has(config.verifiedRoleId)) continue;
+
     const activity = activityData[guild.id]?.[member.id];
     const lastMessageAt = activity?.lastMessageAt || 0;
     const lastVoiceActiveAt = activity?.lastVoiceActiveAt || 0;
@@ -431,7 +570,24 @@ async function syncActivityRoles(guild) {
         }
         if (member.roles.cache.has(config.inactiveRoleId)) await member.roles.remove(config.inactiveRoleId);
       } else {
-        if (!member.roles.cache.has(config.inactiveRoleId)) {
+        const alreadyInactive = member.roles.cache.has(config.inactiveRoleId);
+        if (!alreadyInactive) {
+          // Save all current roles before stripping them
+          const rolesToSave = member.roles.cache
+            .filter((r) => r.id !== guild.id && r.id !== config.inactiveRoleId) // exclude @everyone and inactive role itself
+            .map((r) => r.id);
+
+          if (!savedRolesData[guild.id]) savedRolesData[guild.id] = {};
+          savedRolesData[guild.id][member.id] = rolesToSave;
+          saveSavedRolesData(savedRolesData);
+
+          // Strip all roles except @everyone and managed bot roles
+          const strippable = member.roles.cache.filter((r) => r.id !== guild.id && !r.managed);
+          if (strippable.size > 0) {
+            await member.roles.remove([...strippable.keys()]);
+          }
+
+          // Add inactive role
           await member.roles.add(config.inactiveRoleId);
           madeInactive++;
         }
@@ -602,13 +758,31 @@ async function handleReactivateButton(interaction) {
 
   const member = interaction.member;
   try {
+    // Remove inactive role
     if (config.inactiveRoleId && member.roles.cache.has(config.inactiveRoleId)) {
       await member.roles.remove(config.inactiveRoleId);
     }
-    if (config.activeRoleId && !member.roles.cache.has(config.activeRoleId)) {
-      await member.roles.add(config.activeRoleId);
+
+    // Restore saved roles if we have them
+    const saved = savedRolesData[interaction.guild.id]?.[member.id];
+    if (saved && saved.length > 0) {
+      // Filter out roles that no longer exist in the server
+      const existingRoleIds = interaction.guild.roles.cache.map((r) => r.id);
+      const restoreable = saved.filter((id) => existingRoleIds.includes(id));
+      if (restoreable.length > 0) {
+        await member.roles.add(restoreable);
+      }
+      // Clear the saved roles
+      delete savedRolesData[interaction.guild.id][member.id];
+      saveSavedRolesData(savedRolesData);
+    } else {
+      // No saved roles — just add active role
+      if (config.activeRoleId && !member.roles.cache.has(config.activeRoleId)) {
+        await member.roles.add(config.activeRoleId);
+      }
     }
-    await interaction.reply({ content: "Welcome back! You've been reactivated — full access restored.", flags: MessageFlags.Ephemeral });
+
+    await interaction.reply({ content: "Welcome back! You've been reactivated — full access restored. 🖤", flags: MessageFlags.Ephemeral });
   } catch (err) {
     console.error('Reactivation failed:', err);
     await interaction.reply({ content: 'Something went wrong reactivating you — ping a mod for help.', flags: MessageFlags.Ephemeral });
@@ -870,9 +1044,6 @@ client.on('interactionCreate', async (interaction) => {
       const choice = interaction.values[0];
       if (choice === 'camera') return interaction.update(buildCameraMenuMessage(guildId));
       if (choice === 'activity') return interaction.update(buildActivityMenuMessage(guildId));
-      if (choice === 'catperms') {
-        return interaction.reply({ content: '🔐 **Category Permissions** is managed from the web dashboard — head to the **Category Perms** tab to build templates and apply them! You can also use `/category-perms apply`, `/category-perms unsync`, and `/category-perms list-templates` from Discord directly.', flags: MessageFlags.Ephemeral });
-      }
       return;
     }
     if (id === 'setup:camera:menu') return interaction.update(buildCameraMenuMessage(guildId));
@@ -1288,187 +1459,6 @@ function ensureChannelIndexGuildConfig(guildId) {
 }
 
 // ============================================================
-// Category Permissions — bulk apply role permission overwrites
-// across one or more categories (and optionally their child channels),
-// with reusable saved templates per guild.
-// ============================================================
-const CATEGORY_PERMS_CONFIG_FILE = dataPath('category-perms-config.json');
-
-// The permission flags we expose in the UI — full set covering general
-// access, text, moderation, and voice permissions.
-const MANAGED_PERMS = [
-  // ── General ──
-  { key: 'ViewChannel',               label: '👁️  View Channel',                  group: 'General' },
-  { key: 'ManageChannels',            label: '🔧 Manage Channels',                group: 'General' },
-  { key: 'ManageRoles',               label: '🎭 Manage Roles (Channel Perms)',   group: 'General' },
-  { key: 'ManageWebhooks',            label: '🪝 Manage Webhooks',                group: 'General' },
-  { key: 'CreateInstantInvite',        label: '✉️  Create Invite',                  group: 'General' },
-  // ── Text ──
-  { key: 'SendMessages',              label: '💬 Send Messages',                  group: 'Text' },
-  { key: 'SendMessagesInThreads',     label: '🧵 Send Messages in Threads',       group: 'Text' },
-  { key: 'CreatePublicThreads',       label: '🧵 Create Public Threads',          group: 'Text' },
-  { key: 'CreatePrivateThreads',      label: '🔒 Create Private Threads',         group: 'Text' },
-  { key: 'ManageMessages',            label: '🗑️  Manage Messages',                group: 'Text' },
-  { key: 'ManageThreads',             label: '🗑️  Manage Threads',                 group: 'Text' },
-  { key: 'ReadMessageHistory',        label: '📜 Read Message History',           group: 'Text' },
-  { key: 'AddReactions',              label: '😀 Add Reactions',                  group: 'Text' },
-  { key: 'UseExternalEmojis',         label: '🌐 Use External Emojis',            group: 'Text' },
-  { key: 'UseExternalStickers',       label: '🌐 Use External Stickers',          group: 'Text' },
-  { key: 'MentionEveryone',           label: '📢 Mention @everyone / @here',      group: 'Text' },
-  { key: 'EmbedLinks',                label: '🔗 Embed Links',                    group: 'Text' },
-  { key: 'AttachFiles',               label: '📎 Attach Files',                   group: 'Text' },
-  { key: 'UseApplicationCommands',    label: '🤖 Use Application Commands',       group: 'Text' },
-  { key: 'SendTTSMessages',           label: '🔊 Send TTS Messages',              group: 'Text' },
-  // ── Moderation ──
-  { key: 'KickMembers',               label: '👢 Kick Members',                   group: 'Moderation' },
-  { key: 'BanMembers',                label: '🔨 Ban Members',                    group: 'Moderation' },
-  { key: 'ModerateMembers',           label: '⏱️  Timeout Members',               group: 'Moderation' },
-  { key: 'ViewAuditLog',              label: '📋 View Audit Log',                 group: 'Moderation' },
-  // ── Voice ──
-  { key: 'Connect',                   label: '🎙️  Connect',                        group: 'Voice' },
-  { key: 'Speak',                     label: '🔊 Speak',                          group: 'Voice' },
-  { key: 'Stream',                    label: '🎥 Stream / Go Live',               group: 'Voice' },
-  { key: 'UseEmbeddedActivities',     label: '🎮 Use Activities',                 group: 'Voice' },
-  { key: 'UseVAD',                    label: '🎤 Use Voice Activity (no PTT)',     group: 'Voice' },
-  { key: 'PrioritySpeaker',           label: '⭐ Priority Speaker',               group: 'Voice' },
-  { key: 'MuteMembers',               label: '🔇 Mute Members',                   group: 'Voice' },
-  { key: 'DeafenMembers',             label: '🙉 Deafen Members',                 group: 'Voice' },
-  { key: 'MoveMembers',               label: '↔️  Move Members',                   group: 'Voice' },
-];
-
-function loadCategoryPermsConfig() {
-  try {
-    return JSON.parse(fs.readFileSync(CATEGORY_PERMS_CONFIG_FILE, 'utf-8'));
-  } catch {
-    return {};
-  }
-}
-
-function saveCategoryPermsConfig(config) {
-  try {
-    fs.writeFileSync(CATEGORY_PERMS_CONFIG_FILE, JSON.stringify(config, null, 2));
-    return true;
-  } catch (err) {
-    console.error(`Failed to save category-perms-config.json to ${CATEGORY_PERMS_CONFIG_FILE}:`, err.message);
-    return false;
-  }
-}
-
-let categoryPermsConfig = loadCategoryPermsConfig();
-
-function ensureCategoryPermsGuildConfig(guildId) {
-  if (!categoryPermsConfig[guildId]) {
-    categoryPermsConfig[guildId] = { templates: [] };
-    saveCategoryPermsConfig(categoryPermsConfig);
-  }
-  return categoryPermsConfig[guildId];
-}
-
-// Apply a template to one or more categories.
-// cascade=true also applies to every child channel inside each category.
-// Returns { updated, failed[] }
-async function applyCategoryPermsTemplate(guild, template, categoryIds, cascade) {
-  let updated = 0;
-  const failed = [];
-
-  for (const catId of categoryIds) {
-    const category = guild.channels.cache.get(catId);
-    if (!category || category.type !== ChannelType.GuildCategory) {
-      failed.push({ id: catId, name: catId, error: 'Not a category or not found' });
-      continue;
-    }
-
-    const botMember = guild.members.me;
-    // Dynamically resolve the bot's own managed role (the auto-created one Discord
-    // gives every bot when it joins) — works across all servers without hardcoding.
-    const botRoleId = botMember?.roles?.botRole?.id ?? botMember?.id;
-
-    async function ensureBotAccess(channel) {
-      if (!botMember || !botRoleId) return;
-      if (channel.permissionsFor(botMember)?.has('ViewChannel')) return;
-      try {
-        const existing = channel.permissionOverwrites.cache.get(botRoleId);
-        if (existing) await existing.delete();
-        await channel.permissionOverwrites.edit(botRoleId, { ViewChannel: true });
-      } catch (err) {
-        console.error(`[category-perms] Could not grant self-access to channel #${channel.name}:`, err.message);
-      }
-    }
-
-    await ensureBotAccess(category);
-
-    for (const rolePerms of template.rolePerms) {
-      const overwrite = {};
-      for (const [perm, val] of Object.entries(rolePerms.perms)) {
-        if (val === 'allow') overwrite[perm] = true;
-        else if (val === 'deny') overwrite[perm] = false;
-        // 'neutral' = omit from overwrite object (inherits)
-      }
-      try {
-        await category.permissionOverwrites.edit(rolePerms.roleId, overwrite);
-        updated++;
-      } catch (err) {
-        console.error(`[category-perms] Failed on category #${category.name} (${catId}) for role ${rolePerms.roleId}:`, err.message);
-        failed.push({ id: catId, name: category.name, error: err.message });
-      }
-
-      if (cascade) {
-        const children = guild.channels.cache.filter((c) => c.parentId === catId && c.type !== ChannelType.GuildCategory);
-        for (const child of children.values()) {
-          await ensureBotAccess(child);
-          try {
-            await child.permissionOverwrites.edit(rolePerms.roleId, overwrite);
-            updated++;
-          } catch (err) {
-            console.error(`[category-perms] Failed on channel #${child.name} (${child.id}) for role ${rolePerms.roleId}:`, err.message);
-            failed.push({ id: child.id, name: child.name, error: err.message });
-          }
-        }
-      }
-    }
-  }
-
-  return { updated, failed };
-}
-
-// Remove ALL permission overwrites for a set of role IDs from the given
-// category IDs (and optionally their child channels).
-async function unsyncCategoryPerms(guild, roleIds, categoryIds, cascade) {
-  let updated = 0;
-  const failed = [];
-
-  for (const catId of categoryIds) {
-    const category = guild.channels.cache.get(catId);
-    if (!category || category.type !== ChannelType.GuildCategory) {
-      failed.push({ id: catId, name: catId, error: 'Not a category or not found' });
-      continue;
-    }
-
-    for (const roleId of roleIds) {
-      try {
-        await category.permissionOverwrites.delete(roleId);
-        updated++;
-      } catch (err) {
-        failed.push({ id: catId, name: category.name, error: err.message });
-      }
-
-      if (cascade) {
-        const children = guild.channels.cache.filter((c) => c.parentId === catId && c.type !== ChannelType.GuildCategory);
-        for (const child of children.values()) {
-          try {
-            await child.permissionOverwrites.delete(roleId);
-            updated++;
-          } catch (err) {
-            failed.push({ id: child.id, name: child.name, error: err.message });
-          }
-        }
-      }
-    }
-  }
-
-  return { updated, failed };
-}
-
 // Human-readable names for Discord's channel type numbers
 const CHANNEL_TYPE_NAMES = {
   [ChannelType.GuildText]: 'text',
@@ -1658,27 +1648,6 @@ const commands = [
         .setDescription("Manually check one member's activity status")
         .addUserOption((opt) => opt.setName('user').setDescription('Member to check').setRequired(true))
     ),
-  new SlashCommandBuilder()
-    .setName('category-perms')
-    .setDescription('Bulk apply or remove role permission overwrites across categories')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addSubcommand((sub) =>
-      sub
-        .setName('apply')
-        .setDescription('Apply a saved template to one or more categories')
-        .addStringOption((opt) => opt.setName('template').setDescription('Template name').setRequired(true))
-        .addStringOption((opt) => opt.setName('categories').setDescription('Category IDs (comma-separated)').setRequired(true))
-        .addBooleanOption((opt) => opt.setName('cascade').setDescription('Also apply to channels inside each category?').setRequired(true))
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('unsync')
-        .setDescription('Remove all overwrites for specific roles from categories (and optionally their channels)')
-        .addStringOption((opt) => opt.setName('roles').setDescription('Role IDs to strip (comma-separated)').setRequired(true))
-        .addStringOption((opt) => opt.setName('categories').setDescription('Category IDs (comma-separated)').setRequired(true))
-        .addBooleanOption((opt) => opt.setName('cascade').setDescription('Also strip from channels inside each category?').setRequired(true))
-    )
-    .addSubcommand((sub) => sub.setName('list-templates').setDescription('List saved permission templates for this server')),
 ].map((cmd) => cmd.toJSON());
 
 // ---- Register slash commands with Discord (GLOBAL = works in every server
@@ -2192,42 +2161,6 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
-    if (interaction.commandName === 'category-perms') {
-      const sub = interaction.options.getSubcommand();
-      const guildCfg = ensureCategoryPermsGuildConfig(interaction.guildId);
-
-      if (sub === 'list-templates') {
-        if (!guildCfg.templates.length) {
-          return interaction.reply({ content: 'No templates saved yet. Create them from the dashboard at `/category-perms` page.', flags: MessageFlags.Ephemeral });
-        }
-        const list = guildCfg.templates.map((t, i) => `**${i + 1}. ${t.name}** — ${t.rolePerms.length} role(s)`).join('\n');
-        return interaction.reply({ content: `**Saved templates:**\n${list}`, flags: MessageFlags.Ephemeral });
-      }
-
-      if (sub === 'apply') {
-        const templateName = interaction.options.getString('template').trim();
-        const template = guildCfg.templates.find((t) => t.name.toLowerCase() === templateName.toLowerCase());
-        if (!template) {
-          return interaction.reply({ content: `❌ No template named **${templateName}** found. Use \`/category-perms list-templates\` to see what's saved.`, flags: MessageFlags.Ephemeral });
-        }
-        const categoryIds = interaction.options.getString('categories').split(',').map((s) => s.trim()).filter(Boolean);
-        const cascade = interaction.options.getBoolean('cascade');
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const result = await applyCategoryPermsTemplate(interaction.guild, template, categoryIds, cascade);
-        const failNote = result.failed.length ? `\n⚠️ Failed on ${result.failed.length} item(s) — check bot has Manage Roles & Manage Channels.` : '';
-        return interaction.editReply(`✅ Applied template **${template.name}** to ${categoryIds.length} categor${categoryIds.length === 1 ? 'y' : 'ies'} — **${result.updated}** overwrite(s) updated.${cascade ? ' (cascaded to child channels)' : ''}${failNote}`);
-      }
-
-      if (sub === 'unsync') {
-        const roleIds = interaction.options.getString('roles').split(',').map((s) => s.trim()).filter(Boolean);
-        const categoryIds = interaction.options.getString('categories').split(',').map((s) => s.trim()).filter(Boolean);
-        const cascade = interaction.options.getBoolean('cascade');
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const result = await unsyncCategoryPerms(interaction.guild, roleIds, categoryIds, cascade);
-        const failNote = result.failed.length ? `\n⚠️ Failed on ${result.failed.length} item(s) — check bot has Manage Roles & Manage Channels.` : '';
-        return interaction.editReply(`✅ Removed overwrites for ${roleIds.length} role(s) from ${categoryIds.length} categor${categoryIds.length === 1 ? 'y' : 'ies'} — **${result.updated}** overwrite(s) cleared.${cascade ? ' (cascaded to child channels)' : ''}${failNote}`);
-      }
-    }
 
     if (interaction.commandName === 'channel-index') {
       await interaction.deferReply();
@@ -2579,7 +2512,7 @@ function renderLayout({ title, guildId, currentPath, body, flash }) {
     { path: '/camera', label: 'Camera Policy' },
     { path: '/activity', label: 'Activity Tracker' },
     { path: '/channel-index', label: 'Channel Index' },
-    { path: '/category-perms', label: 'Category Perms' },
+    { path: '/vc-sounds', label: 'VC Sounds' },
   ];
 
   return `<!DOCTYPE html>
@@ -2779,14 +2712,6 @@ app.get('/', async (req, res) => {
       </div>
       <p style="margin-top:12px;"><a href="/channel-index?guild=${guildId}">Configure →</a></p>
     </div>
-
-    <div class="card">
-      <h3>🔐 Category Permissions</h3>
-      <div class="stat-grid">
-        <div class="stat"><div class="num">${ensureCategoryPermsGuildConfig(guildId).templates.length}</div><div class="label">Saved templates</div></div>
-      </div>
-      <p style="margin-top:12px;"><a href="/category-perms?guild=${guildId}">Configure →</a></p>
-    </div>
   `;
   res.send(renderLayout({ title: 'Overview', guildId, currentPath: '/', body, flash: req.query.flash }));
 });
@@ -2966,6 +2891,10 @@ app.get('/activity', (req, res) => {
           <div class="field"><label>Active role</label><select name="activeRoleId"><option value="">-- none --</option>${roleOptions(cfg.activeRoleId)}</select></div>
           <div class="field"><label>Inactive role</label><select name="inactiveRoleId"><option value="">-- none --</option>${roleOptions(cfg.inactiveRoleId)}</select></div>
         </div>
+        <div class="field" style="margin-top:12px;">
+          <label>Verified Member role <span class="muted">— only members with this role will be tracked for activity. Leave blank to track everyone.</span></label>
+          <select name="verifiedRoleId"><option value="">-- track everyone --</option>${roleOptions(cfg.verifiedRoleId)}</select>
+        </div>
         <h3>Exempt roles</h3>
         <div class="checklist">${exemptChecklist}</div>
         <div class="btn-row"><button type="submit">Save Roles</button></div>
@@ -2974,6 +2903,7 @@ app.get('/activity', (req, res) => {
         <form method="POST" action="/activity/create-role"><input type="hidden" name="guild" value="${guildId}"><input type="hidden" name="type" value="active"><button class="secondary" type="submit">Create Active Role</button></form>
         <form method="POST" action="/activity/create-role"><input type="hidden" name="guild" value="${guildId}"><input type="hidden" name="type" value="inactive"><button class="secondary" type="submit">Create Inactive Role</button></form>
         <form method="POST" action="/activity/create-role"><input type="hidden" name="guild" value="${guildId}"><input type="hidden" name="type" value="exempt"><button class="secondary" type="submit">Create Exempt Role</button></form>
+        <form method="POST" action="/activity/create-role"><input type="hidden" name="guild" value="${guildId}"><input type="hidden" name="type" value="verified"><button class="secondary" type="submit">Create Verified Member Role</button></form>
       </div>
     </div>
 
@@ -3048,6 +2978,7 @@ app.post('/activity/save-roles', (req, res) => {
   const cfg = ensureActivityGuildConfig(guildId);
   cfg.activeRoleId = req.body.activeRoleId || null;
   cfg.inactiveRoleId = req.body.inactiveRoleId || null;
+  cfg.verifiedRoleId = req.body.verifiedRoleId || null;
   cfg.exemptRoleIds = asArray(req.body.exemptRoles);
   saveActivityConfig(activityConfig);
   res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Roles saved.')}`);
@@ -3089,16 +3020,18 @@ app.post('/activity/create-role', async (req, res) => {
   const guild = client.guilds.cache.get(guildId);
   const cfg = ensureActivityGuildConfig(guildId);
   const roleSpecs = {
-    active: { name: 'Active Member', colors: [0x00cc66] },
-    inactive: { name: 'Inactive Member', colors: [0x999999] },
-    exempt: { name: 'Activity Tracker Exempt', colors: [0x3498db] },
+    active:   { name: 'Active Member',            colors: [0x00cc66] },
+    inactive: { name: 'Inactive Member',           colors: [0x999999] },
+    exempt:   { name: 'Activity Tracker Exempt',   colors: [0x3498db] },
+    verified: { name: 'Verified Member',           colors: [0xe91e8c] },
   };
   const spec = roleSpecs[req.body.type];
   if (!spec) return res.redirect(`/activity?guild=${guildId}`);
   try {
-    const role = await guild.roles.create({ name: spec.name, colors: [spec.color], reason: 'Created via dashboard' });
+    const role = await guild.roles.create({ name: spec.name, colors: spec.colors, reason: 'Created via dashboard' });
     if (req.body.type === 'active') cfg.activeRoleId = role.id;
     else if (req.body.type === 'inactive') cfg.inactiveRoleId = role.id;
+    else if (req.body.type === 'verified') cfg.verifiedRoleId = role.id;
     else cfg.exemptRoleIds.push(role.id);
     saveActivityConfig(activityConfig);
     res.redirect(`/activity?guild=${guildId}&flash=${encodeURIComponent('Created role: ' + role.name)}`);
@@ -3258,408 +3191,132 @@ app.post('/channel-index/save-descriptions', (req, res) => {
   res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('Descriptions saved.')}`);
 });
 
-// ---- Category Permissions Dashboard ----
-app.get('/category-perms', (req, res) => {
-  const guildId = resolveGuildId(req);
+// ---- VC Sounds Dashboard ----
+app.get('/vc-sounds', (req, res) => {
+  const guildId = req.query.guild || req.session.lastGuildId;
+  if (!guildId) return res.redirect('/');
+  req.session.lastGuildId = guildId;
   const guild = client.guilds.cache.get(guildId);
   if (!guild) return res.redirect('/');
-  const cfg = ensureCategoryPermsGuildConfig(guildId);
 
-  const categories = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildCategory).values()].sort((a, b) => a.rawPosition - b.rawPosition);
-  const roles = [...guild.roles.cache.filter((r) => r.id !== guild.id).values()].sort((a, b) => b.position - a.position);
+  const cfg = ensureVcSoundGuildConfig(guildId);
 
-  const categoryCheckboxes = categories
-    .map((c) => `<label class="check-item"><input type="checkbox" class="cat-check" name="categoryIds" value="${c.id}"> ${escapeHtml(c.name)}</label>`)
-    .join('') || '<p class="muted">No categories found.</p>';
+  // List available sound files
+  const soundFiles = fs.existsSync(VC_SOUNDS_DIR)
+    ? fs.readdirSync(VC_SOUNDS_DIR).filter((f) => f.match(/\.(mp3|wav|ogg|opus|flac)$/i))
+    : [];
 
-  const unsyncCategoryCheckboxes = categories
-    .map((c) => `<label class="check-item"><input type="checkbox" name="categoryIds" value="${c.id}"> ${escapeHtml(c.name)}</label>`)
-    .join('') || '<p class="muted">No categories found.</p>';
+  const soundOptions = soundFiles.map((f) => `<option value="${f}">${f}</option>`).join('');
+  const soundOptionsNone = `<option value="">-- none --</option>${soundOptions}`;
 
-  const roleOptions = roles.map((r) => `<option value="${r.id}">${escapeHtml(r.name)}</option>`).join('');
-  const unsyncRoleCheckboxes = roles
-    .map((r) => `<label class="check-item"><input type="checkbox" name="roleIds" value="${r.id}"> ${escapeHtml(r.name)}</label>`)
-    .join('') || '<p class="muted">No roles found.</p>';
-
-  // Build the permission rows for the template builder, grouped by section
-  const permRows = (() => {
-    const groups = [...new Set(MANAGED_PERMS.map((p) => p.group))];
-    return groups.map((g) => {
-      const groupPerms = MANAGED_PERMS.filter((p) => p.group === g);
-      const header = `<tr><td colspan="2" style="padding-top:12px;padding-bottom:4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-dim);border-bottom:1px solid var(--panel-border);">${escapeHtml(g)}</td></tr>`;
-      const rows = groupPerms.map((p) => `
+  const memberRows = guild.members.cache
+    .filter((m) => !m.user.bot)
+    .map((m) => {
+      const ms = cfg.memberSounds?.[m.id] || {};
+      return `
         <tr>
-          <td style="font-size:13px;padding-left:8px;">${escapeHtml(p.label)}</td>
-          <td><select name="perm_${p.key}" style="width:100%;">
-            <option value="neutral">— Inherit —</option>
-            <option value="allow">✅ Allow</option>
-            <option value="deny">❌ Deny</option>
-          </select></td>
-        </tr>`).join('');
-      return header + rows;
-    }).join('');
-  })();
-
-  // Build the saved templates list
-  const templatesList = cfg.templates.length
-    ? cfg.templates.map((t, i) => `
-      <div class="card" style="margin-bottom:12px;">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
-          <div>
-            <strong>${escapeHtml(t.name)}</strong>
-            <span class="muted" style="margin-left:8px;">${t.rolePerms.length} role(s) configured</span>
-            <div style="margin-top:6px;font-size:12px;color:var(--text-dim);">
-              ${t.rolePerms.map((rp) => {
-                const role = guild.roles.cache.get(rp.roleId);
-                const permsStr = Object.entries(rp.perms)
-                  .filter(([, v]) => v !== 'neutral')
-                  .map(([k, v]) => `${v === 'allow' ? '✅' : '❌'} ${MANAGED_PERMS.find((p) => p.key === k)?.label || k}`)
-                  .join(', ') || 'all inherit';
-                return `<div><strong>${escapeHtml(role?.name || rp.roleId)}:</strong> ${escapeHtml(permsStr)}</div>`;
-              }).join('')}
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <form method="POST" action="/category-perms/delete-template" style="margin:0;">
-              <input type="hidden" name="guild" value="${guildId}">
-              <input type="hidden" name="templateIndex" value="${i}">
-              <button class="danger" type="submit" style="padding:6px 12px;font-size:12px;" onclick="return confirm('Delete template ${escapeHtml(t.name)}?')">Delete</button>
-            </form>
-          </div>
-        </div>
-        <hr style="border-color:var(--panel-border);margin:12px 0;">
-        <form method="POST" action="/category-perms/apply">
-          <input type="hidden" name="guild" value="${guildId}">
-          <input type="hidden" name="templateIndex" value="${i}">
-          <div class="row" style="align-items:flex-end;gap:12px;">
-            <div class="field"><label>Apply to categories</label>
-              <div class="checklist" style="max-height:150px;">${categories.map((c) => `<label class="check-item"><input type="checkbox" name="categoryIds" value="${c.id}"> ${escapeHtml(c.name)}</label>`).join('')}</div>
-            </div>
-            <div class="field"><label>Cascade to child channels?</label>
-              <select name="cascade">
-                <option value="yes">Yes — categories + all channels inside</option>
-                <option value="no">No — categories only</option>
-              </select>
-            </div>
-          </div>
-          <div class="btn-row"><button type="submit">🚀 Apply This Template</button></div>
-        </form>
-      </div>`).join('')
-    : '<p class="muted">No templates saved yet — create one below.</p>';
-
-  // Permission bit map — matches MANAGED_PERMS keys to Discord's bitfield values
-  const PERM_BITS = {
-    CreateInstantInvite: 1n,
-    KickMembers: 2n,
-    BanMembers: 4n,
-    ManageChannels: 16n,
-    ManageRoles: 268435456n,
-    ManageWebhooks: 536870912n,
-    ViewChannel: 1024n,
-    SendMessages: 2048n,
-    SendTTSMessages: 4096n,
-    ManageMessages: 8192n,
-    EmbedLinks: 16384n,
-    AttachFiles: 32768n,
-    ReadMessageHistory: 65536n,
-    MentionEveryone: 131072n,
-    UseExternalEmojis: 262144n,
-    AddReactions: 64n,
-    Connect: 1048576n,
-    Speak: 2097152n,
-    MuteMembers: 4194304n,
-    DeafenMembers: 8388608n,
-    MoveMembers: 16777216n,
-    UseVAD: 33554432n,
-    PrioritySpeaker: 256n,
-    Stream: 512n,
-    ViewAuditLog: 128n,
-    ModerateMembers: 1099511627776n,
-    SendMessagesInThreads: 274877906944n,
-    CreatePublicThreads: 34359738368n,
-    CreatePrivateThreads: 68719476736n,
-    ManageThreads: 17179869184n,
-    UseExternalStickers: 137438953472n,
-    UseApplicationCommands: 2147483648n,
-    UseEmbeddedActivities: 549755813888n,
-  };
-
-  const permBitsJson = JSON.stringify(Object.fromEntries(Object.entries(PERM_BITS).map(([k,v]) => [k, v.toString()])));
+          <td>${escapeHtml(m.displayName)}</td>
+          <td>
+            <select name="join_${m.id}">
+              ${soundFiles.map((f) => `<option value="${f}" ${ms.join === f ? 'selected' : ''}>${f}</option>`).join('')}
+              <option value="" ${!ms.join ? 'selected' : ''}>-- none --</option>
+            </select>
+          </td>
+          <td>
+            <select name="leave_${m.id}">
+              ${soundFiles.map((f) => `<option value="${f}" ${ms.leave === f ? 'selected' : ''}>${f}</option>`).join('')}
+              <option value="" ${!ms.leave ? 'selected' : ''}>-- none --</option>
+            </select>
+          </td>
+        </tr>`;
+    })
+    .join('');
 
   const body = `
-    <script>
-    const PERM_BITS = ${permBitsJson};
-
-    // Parse a permission integer and set all the dropdowns to allow/deny/neutral
-    function applyPermInt(formId, inputId) {
-      const raw = document.getElementById(inputId).value.trim();
-      if (!raw) return;
-      let val;
-      try { val = BigInt(raw); } catch(e) { alert('Invalid permission number — paste the integer from the Discord permission calculator.'); return; }
-
-      const form = document.getElementById(formId);
-      if (!form) return;
-      for (const [key, bit] of Object.entries(PERM_BITS)) {
-        const sel = form.querySelector('select[name="perm_' + key + '"]');
-        if (!sel) continue;
-        sel.value = (val & BigInt(bit)) !== 0n ? 'allow' : 'neutral';
-      }
-    }
-
-    // Live permission calculator — reads all dropdowns and computes the integer
-    function calcPermInt(formId, outputId) {
-      const form = document.getElementById(formId);
-      if (!form) return;
-      let allow = 0n;
-      for (const [key, bit] of Object.entries(PERM_BITS)) {
-        const sel = form.querySelector('select[name="perm_' + key + '"]');
-        if (sel && sel.value === 'allow') allow |= BigInt(bit);
-      }
-      const el = document.getElementById(outputId);
-      if (el) el.textContent = allow.toString();
-    }
-
-    // Wire up live recalc on all perm selects in a form
-    function wireCalc(formId, outputId) {
-      const form = document.getElementById(formId);
-      if (!form) return;
-      form.querySelectorAll('select[name^="perm_"]').forEach(sel => {
-        sel.addEventListener('change', () => calcPermInt(formId, outputId));
-      });
-      calcPermInt(formId, outputId);
-    }
-
-    window.addEventListener('DOMContentLoaded', () => {
-      wireCalc('form-new-template', 'calc-new');
-      wireCalc('form-add-role', 'calc-add');
-    });
-    </script>
-
     <div class="card">
-      <h2>🔐 Category Permissions — ${escapeHtml(guild.name)}</h2>
-      <p class="muted">Build reusable permission templates, then bulk-apply them to categories (and optionally their channels) in one action. Great for keeping bot access, staff roles, and verified member perms uniform across all categories.</p>
+      <h2>🔊 VC Sounds — ${escapeHtml(guild.name)}</h2>
+      <p class="muted">Play audio files when members join or leave voice channels. Upload .mp3/.wav/.ogg files to the <code>vc-sounds/</code> folder on your Railway volume, then configure them here.</p>
     </div>
 
     <div class="card">
-      <h3>Saved Templates</h3>
-      ${templatesList}
-    </div>
-
-    <div class="card">
-      <h3>Create New Template</h3>
-      <form method="POST" action="/category-perms/save-template" id="form-new-template">
+      <h3>Global Settings</h3>
+      <form method="POST" action="/vc-sounds/save-global">
         <input type="hidden" name="guild" value="${guildId}">
-        <div class="field" style="margin-bottom:14px;">
-          <label>Template name</label>
-          <input type="text" name="templateName" placeholder="e.g. Staff Roles, Verified Members, Bots" style="max-width:400px;" required>
-        </div>
-        <p class="muted" style="margin-bottom:10px;">Add roles one at a time — save the template first with one role, then edit to add more.</p>
-        <div class="field" style="margin-bottom:14px;">
-          <label>Role</label>
-          <select name="roleId" style="max-width:400px;">
-            <option value="">-- select a role --</option>
-            ${roleOptions}
+        <div class="field">
+          <label>VC Sounds enabled?</label>
+          <select name="enabled">
+            <option value="true" ${cfg.enabled ? 'selected' : ''}>Yes</option>
+            <option value="false" ${!cfg.enabled ? 'selected' : ''}>No</option>
           </select>
         </div>
-
-        <div style="background:#0d0d14;border:1px solid var(--panel-border);border-radius:10px;padding:16px;margin-bottom:16px;">
-          <h3 style="margin-top:0;">⚡ Permission Calculator</h3>
-          <p class="muted" style="margin-bottom:10px;">Paste a permission integer to auto-fill the dropdowns below — or use the <a href="https://discordapi.com/permissions.html" target="_blank" rel="noopener">Discord Permission Calculator ↗</a> to build one. The number below updates live as you change dropdowns.</p>
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-            <input type="text" id="perm-int-new" placeholder="e.g. 8 for Admin, 3072 for Send+View..." style="max-width:320px;font-family:monospace;">
-            <button type="button" onclick="applyPermInt('form-new-template','perm-int-new')" class="secondary">⚡ Apply to dropdowns</button>
-            <span class="muted" style="font-size:12px;">Current value: <code id="calc-new" style="font-size:13px;color:var(--accent);">0</code></span>
-          </div>
+        <div class="field">
+          <label>Default join sound <span class="muted">(plays for members with no custom sound)</span></label>
+          <select name="defaultJoinSound">${soundOptionsNone.replace(`value="${cfg.defaultJoinSound}"`, `value="${cfg.defaultJoinSound}" selected`)}</select>
         </div>
-
-        <h3 style="margin-top:8px;">Permissions for this role</h3>
-        <table style="max-width:500px;">
-          <thead><tr><th>Permission</th><th>Value</th></tr></thead>
-          <tbody>${permRows}</tbody>
-        </table>
-        <div class="btn-row"><button type="submit">💾 Save Template</button></div>
+        <div class="field">
+          <label>Default leave sound</label>
+          <select name="defaultLeaveSound">${soundOptionsNone.replace(`value="${cfg.defaultLeaveSound}"`, `value="${cfg.defaultLeaveSound}" selected`)}</select>
+        </div>
+        <div class="btn-row"><button type="submit">💾 Save Global Settings</button></div>
       </form>
     </div>
 
     <div class="card">
-      <h3>Add Role to Existing Template</h3>
-      <form method="POST" action="/category-perms/add-role-to-template" id="form-add-role">
+      <h3>Per-Member Custom Sounds</h3>
+      ${soundFiles.length === 0 ? '<p class="muted">⚠️ No sound files found. Upload .mp3/.wav/.ogg files to the <code>vc-sounds/</code> folder on your Railway volume to get started.</p>' : ''}
+      <form method="POST" action="/vc-sounds/save-members">
         <input type="hidden" name="guild" value="${guildId}">
-        <div class="row">
-          <div class="field">
-            <label>Template</label>
-            <select name="templateIndex" style="max-width:300px;">
-              ${cfg.templates.map((t, i) => `<option value="${i}">${escapeHtml(t.name)}</option>`).join('') || '<option value="">No templates yet</option>'}
-            </select>
-          </div>
-          <div class="field">
-            <label>Role</label>
-            <select name="roleId" style="max-width:300px;">
-              <option value="">-- select a role --</option>
-              ${roleOptions}
-            </select>
-          </div>
-        </div>
-
-        <div style="background:#0d0d14;border:1px solid var(--panel-border);border-radius:10px;padding:16px;margin-bottom:16px;">
-          <h3 style="margin-top:0;">⚡ Permission Calculator</h3>
-          <p class="muted" style="margin-bottom:10px;">Paste a permission integer to auto-fill the dropdowns — or use the <a href="https://discordapi.com/permissions.html" target="_blank" rel="noopener">Discord Permission Calculator ↗</a>. The number below updates live as you change dropdowns.</p>
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-            <input type="text" id="perm-int-add" placeholder="e.g. 8 for Admin, 3072 for Send+View..." style="max-width:320px;font-family:monospace;">
-            <button type="button" onclick="applyPermInt('form-add-role','perm-int-add')" class="secondary">⚡ Apply to dropdowns</button>
-            <span class="muted" style="font-size:12px;">Current value: <code id="calc-add" style="font-size:13px;color:var(--accent);">0</code></span>
-          </div>
-        </div>
-
-        <h3 style="margin-top:8px;">Permissions for this role</h3>
-        <table style="max-width:500px;">
-          <thead><tr><th>Permission</th><th>Value</th></tr></thead>
-          <tbody>${(() => {
-            const groups = [...new Set(MANAGED_PERMS.map((p) => p.group))];
-            return groups.map((g) => {
-              const groupPerms = MANAGED_PERMS.filter((p) => p.group === g);
-              const header = `<tr><td colspan="2" style="padding-top:12px;padding-bottom:4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-dim);border-bottom:1px solid var(--panel-border);">${escapeHtml(g)}</td></tr>`;
-              const rows = groupPerms.map((p) => `
-                <tr>
-                  <td style="font-size:13px;padding-left:8px;">${escapeHtml(p.label)}</td>
-                  <td><select name="perm_${p.key}" style="width:100%;">
-                    <option value="neutral">— Inherit —</option>
-                    <option value="allow">✅ Allow</option>
-                    <option value="deny">❌ Deny</option>
-                  </select></td>
-                </tr>`).join('');
-              return header + rows;
-            }).join('');
-          })()}</tbody>
+        <table>
+          <thead><tr><th>Member</th><th>Join Sound</th><th>Leave Sound</th></tr></thead>
+          <tbody>${memberRows}</tbody>
         </table>
-        <div class="btn-row"><button type="submit">➕ Add Role to Template</button></div>
-      </form>
-    </div>
-
-    <div class="card">
-      <h3>🔓 Unsync — Remove Role Overwrites</h3>
-      <p class="muted">Strips ALL permission overwrites for the selected roles from the selected categories (and optionally their child channels). This resets those roles to inherit permissions from the server default.</p>
-      <form method="POST" action="/category-perms/unsync" onsubmit="return confirm('This will delete all selected role overwrites from the selected categories/channels. Continue?');">
-        <input type="hidden" name="guild" value="${guildId}">
-        <div class="row">
-          <div class="field">
-            <label>Roles to strip</label>
-            <div class="checklist">${unsyncRoleCheckboxes}</div>
-          </div>
-          <div class="field">
-            <label>From categories</label>
-            <div class="checklist">${unsyncCategoryCheckboxes}</div>
-          </div>
-          <div class="field">
-            <label>Cascade?</label>
-            <select name="cascade">
-              <option value="yes">Yes — categories + all channels inside</option>
-              <option value="no">No — categories only</option>
-            </select>
-          </div>
-        </div>
-        <div class="btn-row"><button class="danger" type="submit">🔓 Unsync / Remove Overwrites</button></div>
+        <div class="btn-row"><button type="submit">💾 Save Member Sounds</button></div>
       </form>
     </div>
   `;
-  res.send(renderLayout({ title: 'Category Permissions', guildId, currentPath: '/category-perms', body, flash: req.query.flash }));
+
+  res.send(renderLayout({ title: 'VC Sounds', guildId, currentPath: '/vc-sounds', body, flash: req.query.flash }));
 });
 
-app.post('/category-perms/save-template', (req, res) => {
-  const guildId = req.body.guild;
-  const cfg = ensureCategoryPermsGuildConfig(guildId);
-  const templateName = String(req.body.templateName || '').trim();
-  const roleId = req.body.roleId;
-  if (!templateName || !roleId) {
-    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Give the template a name and pick a role.')}`);
-  }
-  const perms = {};
-  for (const p of MANAGED_PERMS) {
-    perms[p.key] = req.body[`perm_${p.key}`] || 'neutral';
-  }
-  // If a template with this name already exists, add the role to it
-  const existing = cfg.templates.find((t) => t.name.toLowerCase() === templateName.toLowerCase());
-  if (existing) {
-    const existingRole = existing.rolePerms.find((rp) => rp.roleId === roleId);
-    if (existingRole) {
-      existingRole.perms = perms;
-    } else {
-      existing.rolePerms.push({ roleId, perms });
+app.post('/vc-sounds/save-global', (req, res) => {
+  const { guild: guildId, enabled, defaultJoinSound, defaultLeaveSound } = req.body;
+  if (!guildId) return res.redirect('/');
+  const cfg = ensureVcSoundGuildConfig(guildId);
+  cfg.enabled = enabled === 'true';
+  cfg.defaultJoinSound = defaultJoinSound || null;
+  cfg.defaultLeaveSound = defaultLeaveSound || null;
+  saveVcSoundConfig(vcSoundConfig);
+  res.redirect(`/vc-sounds?guild=${guildId}&flash=${encodeURIComponent('Global VC sound settings saved!')}`);
+});
+
+app.post('/vc-sounds/save-members', (req, res) => {
+  const { guild: guildId, ...rest } = req.body;
+  if (!guildId) return res.redirect('/');
+  const cfg = ensureVcSoundGuildConfig(guildId);
+  if (!cfg.memberSounds) cfg.memberSounds = {};
+
+  for (const [key, value] of Object.entries(rest)) {
+    const joinMatch = key.match(/^join_(\d+)$/);
+    const leaveMatch = key.match(/^leave_(\d+)$/);
+    if (joinMatch) {
+      const userId = joinMatch[1];
+      if (!cfg.memberSounds[userId]) cfg.memberSounds[userId] = {};
+      cfg.memberSounds[userId].join = value || null;
     }
-  } else {
-    cfg.templates.push({ name: templateName, rolePerms: [{ roleId, perms }] });
+    if (leaveMatch) {
+      const userId = leaveMatch[1];
+      if (!cfg.memberSounds[userId]) cfg.memberSounds[userId] = {};
+      cfg.memberSounds[userId].leave = value || null;
+    }
   }
-  saveCategoryPermsConfig(categoryPermsConfig);
-  res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent(`Template "${templateName}" saved.`)}`);
-});
 
-app.post('/category-perms/add-role-to-template', (req, res) => {
-  const guildId = req.body.guild;
-  const cfg = ensureCategoryPermsGuildConfig(guildId);
-  const idx = parseInt(req.body.templateIndex, 10);
-  const roleId = req.body.roleId;
-  if (isNaN(idx) || !cfg.templates[idx] || !roleId) {
-    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Pick a template and a role.')}`);
+  // Clean up members with no sounds set
+  for (const [userId, sounds] of Object.entries(cfg.memberSounds)) {
+    if (!sounds.join && !sounds.leave) delete cfg.memberSounds[userId];
   }
-  const perms = {};
-  for (const p of MANAGED_PERMS) {
-    perms[p.key] = req.body[`perm_${p.key}`] || 'neutral';
-  }
-  const template = cfg.templates[idx];
-  const existingRole = template.rolePerms.find((rp) => rp.roleId === roleId);
-  if (existingRole) {
-    existingRole.perms = perms;
-  } else {
-    template.rolePerms.push({ roleId, perms });
-  }
-  saveCategoryPermsConfig(categoryPermsConfig);
-  res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent(`Role added/updated in template "${template.name}".`)}`);
-});
 
-app.post('/category-perms/delete-template', (req, res) => {
-  const guildId = req.body.guild;
-  const cfg = ensureCategoryPermsGuildConfig(guildId);
-  const idx = parseInt(req.body.templateIndex, 10);
-  if (isNaN(idx) || !cfg.templates[idx]) {
-    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Template not found.')}`);
-  }
-  const name = cfg.templates[idx].name;
-  cfg.templates.splice(idx, 1);
-  saveCategoryPermsConfig(categoryPermsConfig);
-  res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent(`Deleted template "${name}".`)}`);
-});
-
-app.post('/category-perms/apply', async (req, res) => {
-  const guildId = req.body.guild;
-  const guild = client.guilds.cache.get(guildId);
-  const cfg = ensureCategoryPermsGuildConfig(guildId);
-  const idx = parseInt(req.body.templateIndex, 10);
-  if (isNaN(idx) || !cfg.templates[idx]) {
-    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Template not found.')}`);
-  }
-  const categoryIds = asArray(req.body.categoryIds);
-  if (!categoryIds.length) {
-    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Pick at least one category to apply to.')}`);
-  }
-  const cascade = req.body.cascade === 'yes';
-  const template = cfg.templates[idx];
-  const result = await applyCategoryPermsTemplate(guild, template, categoryIds, cascade);
-  const failNote = result.failed.length ? ` (failed on ${result.failed.length} — check bot has Manage Roles & Manage Channels)` : '';
-  res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent(`Applied "${template.name}" to ${categoryIds.length} categor${categoryIds.length === 1 ? 'y' : 'ies'} — ${result.updated} overwrite(s) updated.${cascade ? ' Cascaded to child channels.' : ''}${failNote}`)}`);
-});
-
-app.post('/category-perms/unsync', async (req, res) => {
-  const guildId = req.body.guild;
-  const guild = client.guilds.cache.get(guildId);
-  const roleIds = asArray(req.body.roleIds);
-  const categoryIds = asArray(req.body.categoryIds);
-  if (!roleIds.length || !categoryIds.length) {
-    return res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent('Pick at least one role and one category.')}`);
-  }
-  const cascade = req.body.cascade === 'yes';
-  const result = await unsyncCategoryPerms(guild, roleIds, categoryIds, cascade);
-  const failNote = result.failed.length ? ` (failed on ${result.failed.length} — check bot has Manage Roles & Manage Channels)` : '';
-  res.redirect(`/category-perms?guild=${guildId}&flash=${encodeURIComponent(`Removed overwrites for ${roleIds.length} role(s) from ${categoryIds.length} categor${categoryIds.length === 1 ? 'y' : 'ies'} — ${result.updated} cleared.${cascade ? ' Cascaded to child channels.' : ''}${failNote}`)}`);
+  saveVcSoundConfig(vcSoundConfig);
+  res.redirect(`/vc-sounds?guild=${guildId}&flash=${encodeURIComponent('Member sounds saved!')}`);
 });
 
 app.listen(PORT, () => {
