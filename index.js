@@ -1,4 +1,4 @@
-// xXOnlineStatusXx Channel Indexer Bot
+// G33KY BOT — Discord community management bot
 // - Exports every channel in the server to channels.json
 // - Registers a /channel-index slash command that posts a formatted
 //   list of channels (name + link) into whatever channel it's run in
@@ -156,51 +156,15 @@ function getAnnouncementUrl(guildId) {
   return ensureGuildConfig(guildId).announcementUrl || null;
 }
 
-// ---- One-time migration/seed for xXOnlineStatusXx ----
-// These were the previously hardcoded values. Kept only as a seed so
-// nothing breaks/resets the first time this update runs. After that,
-// camera-config.json is the live source of truth and these are unused.
-const SEED_GUILD_ID = GUILD_ID;
-const SEED_MONITORED_CHANNELS = [
-  '1492754497305575524',
-  '1508940784764846165',
-  '1519414974882119871',
-  '1519926109192458330',
-  '1497494159391588443',
-  '1511860830612881538',
-  '1519415207884226643',
-  '1533720010835493016',
-  '1529786928453390526',
-  '1491289314053587045',
-  '1491289471596101692',
-  '1491289586201006084',
-];
-const SEED_EXEMPT_ROLES = ['1522494914255126559', '1491315204162850858', '1491333963023650826'];
-const SEED_ANNOUNCEMENT_URL = 'https://discord.com/channels/1491220089398235218/1530781873415127060/1534000463022784552';
+// ---- First-run defaults (universal) ----
+// When a guild uses the bot for the first time, start with safe empty defaults.
+// Admins configure everything via slash commands or the dashboard — nothing is
+// hardcoded to any specific server.
 
 function seedCameraConfigIfNeeded() {
-  const isFirstRun = Object.keys(cameraConfig).length === 0;
-  if (!isFirstRun || !SEED_GUILD_ID) return;
-
-  // Best-effort: respect the old separate on/off file if it happens to exist
-  let enabled = true;
-  try {
-    const old = JSON.parse(fs.readFileSync(dataPath('camera-policy-state.json'), 'utf-8'));
-    if (typeof old[SEED_GUILD_ID] === 'boolean') enabled = old[SEED_GUILD_ID];
-  } catch {
-    // no old file, or unreadable — default to enabled
-  }
-
-  cameraConfig[SEED_GUILD_ID] = {
-    enabled,
-    monitoredChannels: [...SEED_MONITORED_CHANNELS],
-    exemptRoles: [...SEED_EXEMPT_ROLES],
-    graceMinutes: DEFAULT_GRACE_MINUTES,
-    warningMinutes: DEFAULT_WARNING_MINUTES,
-    announcementUrl: SEED_ANNOUNCEMENT_URL,
-  };
-  saveCameraConfig(cameraConfig);
-  console.log('Seeded camera-config.json with the original xXOnlineStatusXx settings.');
+  // Nothing to seed universally — each guild gets a clean config the first time
+  // ensureGuildConfig() is called for it, which already handles defaults.
+  // This function is kept for compatibility but is intentionally a no-op.
 }
 
 // ============================================================
@@ -1280,19 +1244,12 @@ client.on('interactionCreate', async (interaction) => {
 // ============================================================
 
 // ---- Channel-index config: per-guild, editable via the dashboard ----
-// Used to be hardcoded constants (single-guild only). Now stored in
-// channel-index-config.json, same pattern as camera-config.json /
-// activity-config.json, and seeded once from the original hardcoded values
-// below so xXOnlineStatusXx's existing exclusions aren't lost.
+// Stored in channel-index-config.json. Each guild starts with empty defaults
+// and configures exclusions via the dashboard.
 const CHANNEL_INDEX_CONFIG_FILE = dataPath('channel-index-config.json');
 
-const LEGACY_SEED_EXCLUDED_CATEGORY_IDS = [
-  '1517124026756235294', // ✦ ₊ ˚ xX☆ѕтαƒƒ ѕтuƒƒ☆Xx ˚ ₊ ✦
-  '1494265392338702377',
-  '1522368511123525754',
-  '1522167743237984336',
-];
-const LEGACY_SEED_EXCLUDED_CHANNEL_IDS = ['1533592609623376095', '1521265292070752286'];
+const LEGACY_SEED_EXCLUDED_CATEGORY_IDS = [];
+const LEGACY_SEED_EXCLUDED_CHANNEL_IDS = [];
 const LEGACY_SEED_EXCLUDED_NAME_KEYWORDS = ['ticket'];
 
 function loadChannelIndexConfig() {
@@ -1421,14 +1378,24 @@ async function applyCategoryPermsTemplate(guild, template, categoryIds, cascade)
       continue;
     }
 
-    // Check bot can see the category — if not, skip it entirely.
-    // Explicitly locked channels should stay locked; we don't force our way in.
     const botMember = guild.members.me;
-    if (botMember && !category.permissionsFor(botMember)?.has('ViewChannel')) {
-      console.warn(`[category-perms] Skipping category #${category.name} — bot does not have access (intentionally locked channel).`);
-      failed.push({ id: catId, name: category.name, error: 'Skipped — bot does not have ViewChannel access. Check if this channel should be in the template.' });
-      continue;
+    // Dynamically resolve the bot's own managed role (the auto-created one Discord
+    // gives every bot when it joins) — works across all servers without hardcoding.
+    const botRoleId = botMember?.roles?.botRole?.id ?? botMember?.id;
+
+    async function ensureBotAccess(channel) {
+      if (!botMember || !botRoleId) return;
+      if (channel.permissionsFor(botMember)?.has('ViewChannel')) return;
+      try {
+        const existing = channel.permissionOverwrites.cache.get(botRoleId);
+        if (existing) await existing.delete();
+        await channel.permissionOverwrites.edit(botRoleId, { ViewChannel: true });
+      } catch (err) {
+        console.error(`[category-perms] Could not grant self-access to channel #${channel.name}:`, err.message);
+      }
     }
+
+    await ensureBotAccess(category);
 
     for (const rolePerms of template.rolePerms) {
       const overwrite = {};
@@ -1448,12 +1415,7 @@ async function applyCategoryPermsTemplate(guild, template, categoryIds, cascade)
       if (cascade) {
         const children = guild.channels.cache.filter((c) => c.parentId === catId && c.type !== ChannelType.GuildCategory);
         for (const child of children.values()) {
-          // Skip channels the bot can't see — they're intentionally locked
-          if (botMember && !child.permissionsFor(botMember)?.has('ViewChannel')) {
-            console.warn(`[category-perms] Skipping channel #${child.name} — bot does not have access.`);
-            failed.push({ id: child.id, name: child.name, error: 'Skipped — bot does not have ViewChannel access.' });
-            continue;
-          }
+          await ensureBotAccess(child);
           try {
             await child.permissionOverwrites.edit(rolePerms.roleId, overwrite);
             updated++;
