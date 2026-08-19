@@ -2499,6 +2499,7 @@ process.on('unhandledRejection', (err) => {
 // ============================================================
 const express = require('express');
 const session = require('express-session');
+const FileStore = require('session-file-store')(session);
 const crypto = require('crypto');
 
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD;
@@ -2513,11 +2514,17 @@ if (!process.env.SESSION_SECRET) {
 }
 
 const app = express();
-app.set('trust proxy', 1); // Railway sits behind a proxy — needed for secure cookies to work
-app.use(express.urlencoded({ extended: true, limit: '3mb' })); // raised limit: the descriptions editor can post one field per channel
+app.set('trust proxy', 1);
+app.use(express.urlencoded({ extended: true, limit: '3mb' }));
 
 app.use(
   session({
+    store: new FileStore({
+      path: dataPath('sessions'),
+      ttl: 7 * 24 * 60 * 60, // 7 days in seconds
+      retries: 1,
+      logFn: () => {}, // silence file-store's own logs
+    }),
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
