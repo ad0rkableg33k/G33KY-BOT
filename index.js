@@ -244,31 +244,44 @@ async function playVcSound(guild, voiceChannelId, soundFile) {
   if (!channel || channel.type !== ChannelType.GuildVoice) return;
 
   let connection;
+  let destroyed = false;
+
+  function safeDestroy() {
+    if (!destroyed) {
+      destroyed = true;
+      try { connection?.destroy(); } catch { /* already gone */ }
+    }
+  }
+
   try {
     connection = joinVoiceChannel({
       channelId: voiceChannelId,
       guildId: guild.id,
       adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf: false,
+      selfDeaf: true,
       selfMute: false,
     });
 
-    await entersState(connection, VoiceConnectionStatus.Ready, 5000);
+    // Wait for connection to be fully ready before playing
+    await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
 
     const player = createAudioPlayer();
     const resource = createAudioResource(fullPath);
-    player.play(resource);
-    connection.subscribe(player);
 
+    connection.subscribe(player);
+    player.play(resource);
+
+    // Wait for playback to finish
     await new Promise((resolve, reject) => {
-      player.once(AudioPlayerStatus.Idle, resolve);
-      player.once('error', reject);
-      setTimeout(resolve, 30000); // safety timeout — disconnect after 30s max
+      const timeout = setTimeout(resolve, 30_000); // safety timeout
+      player.once(AudioPlayerStatus.Idle, () => { clearTimeout(timeout); resolve(); });
+      player.once('error', (err) => { clearTimeout(timeout); reject(err); });
     });
+
   } catch (err) {
     console.error(`[vc-sound] Failed to play sound in guild ${guild.id}:`, err.message);
   } finally {
-    if (connection) connection.destroy();
+    safeDestroy();
   }
 }
 
