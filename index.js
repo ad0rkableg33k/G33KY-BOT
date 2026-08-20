@@ -190,23 +190,7 @@ function seedCameraConfigIfNeeded() {
 
 const ACTIVITY_CONFIG_FILE = dataPath('activity-config.json');
 const ACTIVITY_DATA_FILE = dataPath('activity-data.json');
-const SAVED_ROLES_FILE = dataPath('saved-roles.json');
-
-function loadSavedRoles() {
-  try {
-    return JSON.parse(fs.readFileSync(SAVED_ROLES_FILE, 'utf-8'));
-  } catch {
-    return {};
-  }
-}
-function saveSavedRolesData(data) {
-  try {
-    fs.writeFileSync(SAVED_ROLES_FILE, JSON.stringify(data, null, 2));
-  } catch (err) {
-    console.error(`Failed to save saved-roles.json:`, err.message);
-  }
-}
-let savedRolesData = loadSavedRoles();
+let activityData = loadActivityData();
 
 // ============================================================
 // VC Sound System — plays audio files when members join/leave VCs
@@ -390,8 +374,6 @@ function saveActivityData(data) {
   }
 }
 
-let activityData = loadActivityData();
-
 function getMemberActivity(guildId, userId) {
   if (!activityData[guildId]) activityData[guildId] = {};
   if (!activityData[guildId][userId]) {
@@ -549,49 +531,42 @@ async function syncActivityRoles(guild) {
     if (member.user.bot) continue;
     if (config.exemptRoleIds.some((r) => member.roles.cache.has(r))) continue;
 
-    // Only track members who have the verified role (if one is configured)
-    if (config.verifiedRoleId && !member.roles.cache.has(config.verifiedRoleId)) continue;
+    // Only track members who have the verified role (if one is configured).
+    // Members without it are completely ignored — they're unverified.
+    const hasVerified = config.verifiedRoleId ? member.roles.cache.has(config.verifiedRoleId) : true;
+    const hasInactive = config.inactiveRoleId ? member.roles.cache.has(config.inactiveRoleId) : false;
+
+    // Skip entirely if they have neither verified nor inactive role — not our concern
+    if (!hasVerified && !hasInactive) continue;
 
     const activity = activityData[guild.id]?.[member.id];
     const lastMessageAt = activity?.lastMessageAt || 0;
     const lastVoiceActiveAt = activity?.lastVoiceActiveAt || 0;
-    // Brand-new members get a grace period — join date counts as their
-    // baseline "last active" so nobody gets quarantined the day they join.
     const joinedAt = member.joinedTimestamp || 0;
     const lastActive = Math.max(lastMessageAt, lastVoiceActiveAt, joinedAt);
-
     const isActive = now - lastActive <= thresholdMs;
 
     try {
       if (isActive) {
-        if (!member.roles.cache.has(config.activeRoleId)) {
-          await member.roles.add(config.activeRoleId);
+        // Active — ensure they have verified role, no inactive role
+        if (config.inactiveRoleId && hasInactive) await member.roles.remove(config.inactiveRoleId);
+        if (config.verifiedRoleId && !hasVerified) {
+          await member.roles.add(config.verifiedRoleId);
           madeActive++;
         }
-        if (member.roles.cache.has(config.inactiveRoleId)) await member.roles.remove(config.inactiveRoleId);
-      } else {
-        const alreadyInactive = member.roles.cache.has(config.inactiveRoleId);
-        if (!alreadyInactive) {
-          // Save all current roles before stripping them
-          const rolesToSave = member.roles.cache
-            .filter((r) => r.id !== guild.id && r.id !== config.inactiveRoleId) // exclude @everyone and inactive role itself
-            .map((r) => r.id);
-
-          if (!savedRolesData[guild.id]) savedRolesData[guild.id] = {};
-          savedRolesData[guild.id][member.id] = rolesToSave;
-          saveSavedRolesData(savedRolesData);
-
-          // Strip all roles except @everyone and managed bot roles
-          const strippable = member.roles.cache.filter((r) => r.id !== guild.id && !r.managed);
-          if (strippable.size > 0) {
-            await member.roles.remove([...strippable.keys()]);
-          }
-
-          // Add inactive role
-          await member.roles.add(config.inactiveRoleId);
-          madeInactive++;
+        if (config.activeRoleId && !member.roles.cache.has(config.activeRoleId)) {
+          await member.roles.add(config.activeRoleId);
         }
-        if (member.roles.cache.has(config.activeRoleId)) await member.roles.remove(config.activeRoleId);
+      } else {
+        // Inactive — remove verified role, add inactive role
+        if (!hasInactive) {
+          if (config.verifiedRoleId && hasVerified) await member.roles.remove(config.verifiedRoleId);
+          if (config.activeRoleId && member.roles.cache.has(config.activeRoleId)) await member.roles.remove(config.activeRoleId);
+          if (config.inactiveRoleId) {
+            await member.roles.add(config.inactiveRoleId);
+            madeInactive++;
+          }
+        }
       }
     } catch (err) {
       failed++;
@@ -609,79 +584,43 @@ async function syncAllActivityGuilds() {
 }
 
 // ---- Channel restrictions: lock the Inactive role out of every channel
-// except the quarantine/reactivation one. This is an explicit, admin-
-// triggered action (never automatic) since it edits permission overwrites
-// across the entire server — a consequential, bulk change that shouldn't
-// ever happen silently. Once applied, newly created channels are locked
-// down automatically too (see the channelCreate listener below), so the
-// admin doesn't have to remember to re-run this every time a channel gets
-// added.
+// Sets the Inactive role's permission overwrite on ONLY the quarantine/reactivation
+// channel — allowing them to see it and click the reactivate button.
+// Everything else stays invisible because @everyone has no View Channel server-wide.
+// This only needs to run once when the channel is first configured, or if the
+// inactive role changes.
 async function applyInactiveChannelRestrictions(guild) {
   const cfg = ensureActivityGuildConfig(guild.id);
   if (!cfg.inactiveRoleId || !cfg.quarantineChannelId) {
-    return { success: false, reason: 'Set both the Inactive role and the quarantine channel first.' };
+    return { success: false, reason: 'Set both the Inactive role and the reactivation channel first.' };
   }
 
-  let updated = 0;
-  const failed = [];
-
-  for (const channel of guild.channels.cache.values()) {
-    if (channel.type === ChannelType.GuildCategory) continue;
-    if (channel.isThread?.()) continue; // threads inherit from their parent channel, no overwrites of their own
-
-    const isQuarantineChannel = channel.id === cfg.quarantineChannelId;
-    try {
-      if (isQuarantineChannel) {
-        await channel.permissionOverwrites.edit(cfg.inactiveRoleId, {
-          ViewChannel: true,
-          ReadMessageHistory: true,
-          SendMessages: true,
-        });
-      } else {
-        await channel.permissionOverwrites.edit(cfg.inactiveRoleId, {
-          ViewChannel: false,
-          SendMessages: false,
-          ReadMessageHistory: false,
-        });
-      }
-      updated++;
-    } catch (err) {
-      failed.push({ channelId: channel.id, name: channel.name, error: err.message });
-    }
+  const channel = guild.channels.cache.get(cfg.quarantineChannelId);
+  if (!channel) {
+    return { success: false, reason: 'Reactivation channel not found — has it been deleted?' };
   }
 
-  cfg.channelRestrictionsApplied = true;
-  saveActivityConfig(activityConfig);
+  try {
+    // Allow inactive members to see and interact with ONLY this channel
+    await channel.permissionOverwrites.edit(cfg.inactiveRoleId, {
+      ViewChannel: true,
+      ReadMessageHistory: true,
+      SendMessages: false, // read-only — they can only click the reactivate button
+    });
 
-  if (failed.length > 0) {
-    console.error(
-      `[activity-restrictions] ${guild.id}: updated ${updated} channel(s), failed on ${failed.length}: ${failed.map((f) => `#${f.name} (${f.error})`).join('; ')}`
-    );
+    cfg.channelRestrictionsApplied = true;
+    saveActivityConfig(activityConfig);
+
+    return { success: true, updated: 1, failed: [] };
+  } catch (err) {
+    console.error(`[activity-restrictions] Failed to set inactive channel perms in ${guild.id}:`, err.message);
+    return { success: false, reason: err.message };
   }
-
-  return { success: true, updated, failed };
 }
 
-// Once an admin has applied restrictions at least once, keep every NEW
-// channel locked down the same way automatically — otherwise every channel
-// created after that point would be visible to Inactive members by default
-// until someone remembered to re-run the apply action.
-client.on('channelCreate', async (channel) => {
-  if (!channel.guild) return;
-  if (channel.type === ChannelType.GuildCategory) return;
-  const cfg = ensureActivityGuildConfig(channel.guild.id);
-  if (!cfg.channelRestrictionsApplied || !cfg.inactiveRoleId || !cfg.quarantineChannelId) return;
-  if (channel.id === cfg.quarantineChannelId) return;
-  try {
-    await channel.permissionOverwrites.edit(cfg.inactiveRoleId, {
-      ViewChannel: false,
-      SendMessages: false,
-      ReadMessageHistory: false,
-    });
-  } catch (err) {
-    console.error(`Failed to auto-apply Inactive role restriction to new channel #${channel.name} (${channel.id}):`, err.message);
-  }
-});
+// No channelCreate listener needed — new channels stay invisible to Inactive
+// members automatically because @everyone has no View Channel server-wide.
+// Only the reactivation channel has an explicit Inactive role overwrite.
 
 // ---- Data retention: automatically purge raw activity timestamps once
 // they're older than each guild's configured retention window (default 90
@@ -752,6 +691,8 @@ function buildReactivationEmbedAndRow() {
 
 async function handleReactivateButton(interaction) {
   const config = ensureActivityGuildConfig(interaction.guild.id);
+
+  // Stamp activity as now — gives them a fresh 30 days
   const activity = getMemberActivity(interaction.guild.id, interaction.user.id);
   activity.lastMessageAt = Date.now();
   saveActivityData(activityData);
@@ -762,27 +703,15 @@ async function handleReactivateButton(interaction) {
     if (config.inactiveRoleId && member.roles.cache.has(config.inactiveRoleId)) {
       await member.roles.remove(config.inactiveRoleId);
     }
-
-    // Restore saved roles if we have them
-    const saved = savedRolesData[interaction.guild.id]?.[member.id];
-    if (saved && saved.length > 0) {
-      // Filter out roles that no longer exist in the server
-      const existingRoleIds = interaction.guild.roles.cache.map((r) => r.id);
-      const restoreable = saved.filter((id) => existingRoleIds.includes(id));
-      if (restoreable.length > 0) {
-        await member.roles.add(restoreable);
-      }
-      // Clear the saved roles
-      delete savedRolesData[interaction.guild.id][member.id];
-      saveSavedRolesData(savedRolesData);
-    } else {
-      // No saved roles — just add active role
-      if (config.activeRoleId && !member.roles.cache.has(config.activeRoleId)) {
-        await member.roles.add(config.activeRoleId);
-      }
+    // Restore verified role
+    if (config.verifiedRoleId && !member.roles.cache.has(config.verifiedRoleId)) {
+      await member.roles.add(config.verifiedRoleId);
     }
-
-    await interaction.reply({ content: "Welcome back! You've been reactivated — full access restored. 🖤", flags: MessageFlags.Ephemeral });
+    // Add active role
+    if (config.activeRoleId && !member.roles.cache.has(config.activeRoleId)) {
+      await member.roles.add(config.activeRoleId);
+    }
+    await interaction.reply({ content: "Welcome back!! You've been reactivated — full access restored. You'll stay active as long as you send a message or spend time in voice at least once every 30 days. 🖤", flags: MessageFlags.Ephemeral });
   } catch (err) {
     console.error('Reactivation failed:', err);
     await interaction.reply({ content: 'Something went wrong reactivating you — ping a mod for help.', flags: MessageFlags.Ephemeral });
@@ -2433,6 +2362,27 @@ process.on('unhandledRejection', (err) => {
 const express = require('express');
 const session = require('express-session');
 const FileStore = require('session-file-store')(session);
+const multer = require('multer');
+
+// Multer storage — saves uploads directly to the vc-sounds volume folder
+const soundUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, VC_SOUNDS_DIR),
+    filename: (req, file, cb) => {
+      // Sanitize filename — strip path traversal chars, keep extension
+      const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+      cb(null, safe);
+    },
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max per file
+  fileFilter: (req, file, cb) => {
+    const allowed = /\.(mp3|wav|ogg|opus|flac)$/i;
+    if (!allowed.test(file.originalname)) {
+      return cb(new Error('Only .mp3, .wav, .ogg, .opus, and .flac files are allowed.'));
+    }
+    cb(null, true);
+  },
+});
 const crypto = require('crypto');
 
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD;
@@ -2883,6 +2833,19 @@ app.get('/activity', (req, res) => {
       </form>
     </div>
 
+    <div class="card" style="border-left: 3px solid var(--accent);">
+      <h3>⚙️ How to set this up correctly</h3>
+      <p class="muted" style="margin-bottom:10px;">For the activity tracker to work the way it's designed, your Discord server needs to be configured like this:</p>
+      <ol style="color:var(--text-muted);padding-left:20px;line-height:2;">
+        <li><strong style="color:var(--text-normal);">@everyone → no permissions</strong> — In Server Settings → Roles → @everyone, leave ALL permissions off. Don't check or X anything.</li>
+        <li><strong style="color:var(--text-normal);">@everyone → View Channel ❌ on every category</strong> — In each category's settings, explicitly deny View Channel for @everyone so unverified people and inactive members can't see any channels by default.</li>
+        <li><strong style="color:var(--text-normal);">Verified Member role → no server-level permissions</strong> — Leave the Verified Member role permissions blank in Server Settings → Roles. All access is granted per-channel, not server-wide.</li>
+        <li><strong style="color:var(--text-normal);">Add Verified Member role to every channel you want verified users to see</strong> — Go into each channel → Permissions → add the Verified Member role with View Channel ✅ (and whatever else they need).</li>
+        <li><strong style="color:var(--text-normal);">Set up the reactivation channel below</strong> — The bot will automatically give the Inactive role View Channel access to ONLY that one channel. Everything else stays invisible to inactive members.</li>
+      </ol>
+      <p class="muted" style="margin-top:8px;">When a member goes inactive: the bot removes their Verified Member role and adds the Inactive role — they instantly lose access to everything except the reactivation channel. When they reactivate: the bot removes the Inactive role and restores the Verified Member role, giving them full access again automatically.</p>
+    </div>
+
     <div class="card">
       <form method="POST" action="/activity/save-roles">
         <input type="hidden" name="guild" value="${guildId}">
@@ -3209,6 +3172,29 @@ app.get('/vc-sounds', (req, res) => {
   const soundOptions = soundFiles.map((f) => `<option value="${f}">${f}</option>`).join('');
   const soundOptionsNone = `<option value="">-- none --</option>${soundOptions}`;
 
+  // Build public URL base for hosted sound links
+  const publicBase = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/vc-sounds/files`
+    : null;
+
+  const fileList = soundFiles.length > 0
+    ? soundFiles.map((f) => {
+        const publicUrl = publicBase ? `${publicBase}/${encodeURIComponent(f)}` : null;
+        return `
+          <tr>
+            <td>${escapeHtml(f)}</td>
+            <td>${publicUrl ? `<a href="${publicUrl}" target="_blank" style="font-family:monospace;font-size:12px;">${publicUrl}</a>` : '<span class="muted">Set RAILWAY_PUBLIC_DOMAIN env var to get links</span>'}</td>
+            <td>
+              <form method="POST" action="/vc-sounds/delete-file" style="margin:0;">
+                <input type="hidden" name="guild" value="${guildId}">
+                <input type="hidden" name="filename" value="${escapeHtml(f)}">
+                <button class="danger" type="submit" onclick="return confirm('Delete ${escapeHtml(f)}?')" style="padding:3px 10px;font-size:12px;">Delete</button>
+              </form>
+            </td>
+          </tr>`;
+      }).join('')
+    : '<tr><td colspan="3" class="muted">No files uploaded yet.</td></tr>';
+
   const memberRows = guild.members.cache
     .filter((m) => !m.user.bot)
     .map((m) => {
@@ -3235,7 +3221,28 @@ app.get('/vc-sounds', (req, res) => {
   const body = `
     <div class="card">
       <h2>🔊 VC Sounds — ${escapeHtml(guild.name)}</h2>
-      <p class="muted">Play audio files when members join or leave voice channels. Upload .mp3/.wav/.ogg files to the <code>vc-sounds/</code> folder on your Railway volume, then configure them here.</p>
+      <p class="muted">Upload audio files here to use as join/leave sounds for the bot. Uploaded files also get a public URL you can paste directly into the Equicord VCEntrance plugin!!</p>
+    </div>
+
+    <div class="card">
+      <h3>📁 Upload Sound Files</h3>
+      <p class="muted">Accepted: .mp3, .wav, .ogg, .opus, .flac — max 10MB each</p>
+      <form method="POST" action="/vc-sounds/upload" enctype="multipart/form-data">
+        <input type="hidden" name="guild" value="${guildId}">
+        <div class="field">
+          <input type="file" name="sounds" accept=".mp3,.wav,.ogg,.opus,.flac" multiple style="margin-bottom:8px;">
+        </div>
+        <div class="btn-row"><button type="submit">⬆️ Upload</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>🗂️ Uploaded Files</h3>
+      ${publicBase ? `<p class="muted">Copy a URL below to use in the Equicord VCEntrance plugin settings!!</p>` : `<p class="muted">⚠️ Add <code>RAILWAY_PUBLIC_DOMAIN</code> as a Railway environment variable (e.g. <code>g33ky-bot-production.up.railway.app</code>) to get public URLs for the Equicord plugin.</p>`}
+      <table>
+        <thead><tr><th>File</th><th>Public URL</th><th></th></tr></thead>
+        <tbody>${fileList}</tbody>
+      </table>
     </div>
 
     <div class="card">
@@ -3317,6 +3324,46 @@ app.post('/vc-sounds/save-members', (req, res) => {
 
   saveVcSoundConfig(vcSoundConfig);
   res.redirect(`/vc-sounds?guild=${guildId}&flash=${encodeURIComponent('Member sounds saved!')}`);
+});
+
+// Serve uploaded sound files publicly so Equicord plugin can use the URLs
+app.use('/vc-sounds/files', express.static(VC_SOUNDS_DIR));
+
+// Upload one or more sound files
+app.post('/vc-sounds/upload', (req, res) => {
+  const guildId = req.query.guild || req.body?.guild;
+  soundUpload.array('sounds', 20)(req, res, (err) => {
+    const guild = req.body?.guild || guildId;
+    if (err) {
+      return res.redirect(`/vc-sounds?guild=${guild}&flash=${encodeURIComponent('Upload failed: ' + err.message)}`);
+    }
+    const count = req.files?.length ?? 0;
+    res.redirect(`/vc-sounds?guild=${guild}&flash=${encodeURIComponent(count > 0 ? `Uploaded ${count} file(s)!` : 'No files uploaded.')}`);
+  });
+});
+
+// Delete a sound file
+app.post('/vc-sounds/delete-file', (req, res) => {
+  const { guild: guildId, filename } = req.body;
+  if (!filename) return res.redirect(`/vc-sounds?guild=${guildId}`);
+  const safe = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const fullPath = require('path').join(VC_SOUNDS_DIR, safe);
+  try {
+    if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+    // Also clear any configs referencing this file
+    for (const cfg of Object.values(vcSoundConfig)) {
+      if (cfg.defaultJoinSound === safe) cfg.defaultJoinSound = null;
+      if (cfg.defaultLeaveSound === safe) cfg.defaultLeaveSound = null;
+      for (const ms of Object.values(cfg.memberSounds || {})) {
+        if (ms.join === safe) ms.join = null;
+        if (ms.leave === safe) ms.leave = null;
+      }
+    }
+    saveVcSoundConfig(vcSoundConfig);
+    res.redirect(`/vc-sounds?guild=${guildId}&flash=${encodeURIComponent(`Deleted ${safe}.`)}`);
+  } catch (err) {
+    res.redirect(`/vc-sounds?guild=${guildId}&flash=${encodeURIComponent('Delete failed: ' + err.message)}`);
+  }
 });
 
 app.listen(PORT, () => {
