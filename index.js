@@ -52,15 +52,6 @@ const {
   MessageFlags,
 } = require('discord.js');
 
-const {
-  joinVoiceChannel,
-  createAudioPlayer,
-  createAudioResource,
-  AudioPlayerStatus,
-  VoiceConnectionStatus,
-  entersState,
-} = require('@discordjs/voice');
-
 const TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID; // your primary server ID (used for startup convenience exports + seeding)
 
@@ -192,124 +183,6 @@ const ACTIVITY_CONFIG_FILE = dataPath('activity-config.json');
 const ACTIVITY_DATA_FILE = dataPath('activity-data.json');
 let activityData = loadActivityData();
 
-// ============================================================
-// VC Sound System — plays audio files when members join/leave VCs
-// Configurable per-member, per-server
-// ============================================================
-const VC_SOUND_CONFIG_FILE = dataPath('vc-sound-config.json');
-const VC_SOUNDS_DIR = dataPath('vc-sounds'); // folder where audio files are stored
-
-// Ensure the sounds directory exists
-if (!fs.existsSync(VC_SOUNDS_DIR)) fs.mkdirSync(VC_SOUNDS_DIR, { recursive: true });
-
-function loadVcSoundConfig() {
-  try {
-    return JSON.parse(fs.readFileSync(VC_SOUND_CONFIG_FILE, 'utf-8'));
-  } catch {
-    return {};
-  }
-}
-function saveVcSoundConfig(data) {
-  try {
-    fs.writeFileSync(VC_SOUND_CONFIG_FILE, JSON.stringify(data, null, 2));
-  } catch (err) {
-    console.error(`Failed to save vc-sound-config.json:`, err.message);
-  }
-}
-let vcSoundConfig = loadVcSoundConfig();
-
-function ensureVcSoundGuildConfig(guildId) {
-  if (!vcSoundConfig[guildId]) {
-    vcSoundConfig[guildId] = {
-      enabled: false,
-      defaultJoinSound: null,  // filename in vc-sounds/
-      defaultLeaveSound: null,
-      memberSounds: {},         // { userId: { join: filename, leave: filename } }
-    };
-    saveVcSoundConfig(vcSoundConfig);
-  }
-  return vcSoundConfig[guildId];
-}
-
-// Play a sound file in a voice channel, then disconnect
-async function playVcSound(guild, voiceChannelId, soundFile) {
-  if (!soundFile) return;
-  const fullPath = require('path').join(VC_SOUNDS_DIR, soundFile);
-  if (!fs.existsSync(fullPath)) {
-    console.warn(`[vc-sound] Sound file not found: ${fullPath}`);
-    return;
-  }
-
-  const channel = guild.channels.cache.get(voiceChannelId);
-  if (!channel || channel.type !== ChannelType.GuildVoice) return;
-
-  let connection;
-  let destroyed = false;
-
-  function safeDestroy() {
-    if (!destroyed) {
-      destroyed = true;
-      try { connection?.destroy(); } catch { /* already gone */ }
-    }
-  }
-
-  try {
-    connection = joinVoiceChannel({
-      channelId: voiceChannelId,
-      guildId: guild.id,
-      adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf: true,
-      selfMute: false,
-    });
-
-    // Wait for connection to be fully ready before playing
-    await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
-
-    const player = createAudioPlayer();
-    const resource = createAudioResource(fullPath);
-
-    connection.subscribe(player);
-    player.play(resource);
-
-    // Wait for playback to finish
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(resolve, 30_000); // safety timeout
-      player.once(AudioPlayerStatus.Idle, () => { clearTimeout(timeout); resolve(); });
-      player.once('error', (err) => { clearTimeout(timeout); reject(err); });
-    });
-
-  } catch (err) {
-    console.error(`[vc-sound] Failed to play sound in guild ${guild.id}:`, err.message);
-  } finally {
-    safeDestroy();
-  }
-}
-
-// Voice state listener for join/leave sounds
-client.on('voiceStateUpdate', async (oldState, newState) => {
-  const guild = newState.guild || oldState.guild;
-  if (!guild) return;
-  const cfg = ensureVcSoundGuildConfig(guild.id);
-  if (!cfg.enabled) return;
-
-  const userId = newState.member?.id || oldState.member?.id;
-  if (!userId) return;
-  if (newState.member?.user?.bot) return; // ignore bots
-
-  const memberSounds = cfg.memberSounds?.[userId] || {};
-
-  const joined = !oldState.channelId && newState.channelId;
-  const left = oldState.channelId && !newState.channelId;
-  const switched = oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId;
-
-  if (joined || switched) {
-    const sound = memberSounds.join || cfg.defaultJoinSound;
-    if (sound) await playVcSound(guild, newState.channelId, sound);
-  } else if (left) {
-    const sound = memberSounds.leave || cfg.defaultLeaveSound;
-    if (sound) await playVcSound(guild, oldState.channelId, sound);
-  }
-});
 const DEFAULT_THRESHOLD_DAYS = 30;
 const DEFAULT_RETENTION_DAYS = 90; // how long a raw activity timestamp is kept before being purged entirely
 const DEFAULT_VOICE_MINUTES_REQUIRED = 1; // continuous minutes in a single voice session before it counts as activity
@@ -1412,6 +1285,303 @@ const CHANNEL_TYPE_NAMES = {
   [ChannelType.GuildMedia]: 'media',
 };
 
+
+// ============================================================
+// VC Shuffle System — periodically shuffles users between temporary
+// voice channels in randomized groups of 2–5 people every 5–10 min
+// ============================================================
+
+const VC_SHUFFLE_CONFIG_FILE = dataPath('vc-shuffle-config.json');
+
+function loadVcShuffleConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(VC_SHUFFLE_CONFIG_FILE, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveVcShuffleConfig(data) {
+  try {
+    fs.writeFileSync(VC_SHUFFLE_CONFIG_FILE, JSON.stringify(data, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`Failed to save vc-shuffle-config.json:`, err.message);
+    return false;
+  }
+}
+
+let vcShuffleConfig = loadVcShuffleConfig();
+
+function ensureVcShuffleGuildConfig(guildId) {
+  if (!vcShuffleConfig[guildId]) {
+    vcShuffleConfig[guildId] = {
+      enabled: false,
+      lobbyChannelIds: [],    // channels whose current members are pooled for shuffling
+      categoryId: null,       // category to create temp rooms in (null = top-level)
+      minGroupSize: 2,
+      maxGroupSize: 5,
+      minIntervalMinutes: 5,
+      maxIntervalMinutes: 10,
+      announcementChannelId: null, // optional text channel for shuffle announcements
+      createdChannelIds: [],   // temp voice channels we made, so we can clean them up
+    };
+    saveVcShuffleConfig(vcShuffleConfig);
+  }
+  if (!vcShuffleConfig[guildId].announcementChannelId) {
+    vcShuffleConfig[guildId].announcementChannelId = null;
+  }
+  if (!vcShuffleConfig[guildId].createdChannelIds) {
+    vcShuffleConfig[guildId].createdChannelIds = [];
+  }
+  return vcShuffleConfig[guildId];
+}
+
+// In-memory shuffle state per guild
+// guildId -> { intervalId, nextShuffleAt, roundNumber }
+const shuffleState = new Map();
+
+// Fisher-Yates shuffle
+function shuffleArray(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Split a shuffled array into groups of size between min and max.
+// Uses a greedy approach: keep slicing off groups of random size,
+// but if the remainder would be smaller than minSize, absorb it into the last group.
+function splitIntoGroups(members, minSize, maxSize) {
+  const shuffled = shuffleArray(members);
+  const groups = [];
+  let i = 0;
+  while (i < shuffled.length) {
+    const remaining = shuffled.length - i;
+    if (remaining <= maxSize) {
+      // absorb whatever's left into one final group
+      groups.push(shuffled.slice(i));
+      break;
+    }
+    const size = Math.floor(Math.random() * (maxSize - minSize + 1)) + minSize;
+    groups.push(shuffled.slice(i, i + size));
+    i += size;
+  }
+  return groups;
+}
+
+// Collect all human members currently in any of the lobby channels
+function collectPoolMembers(guild, cfg) {
+  const members = [];
+  const seen = new Set();
+  for (const channelId of cfg.lobbyChannelIds) {
+    const ch = guild.channels.cache.get(channelId);
+    if (!ch) continue;
+    for (const member of ch.members.values()) {
+      if (member.user.bot) continue;
+      if (seen.has(member.id)) continue;
+      seen.add(member.id);
+      members.push(member);
+    }
+  }
+  return members;
+}
+
+// Delete all temporary shuffle channels we created for a guild
+async function cleanupShuffleChannels(guild, cfg) {
+  const toDelete = [...cfg.createdChannelIds];
+  cfg.createdChannelIds = [];
+  saveVcShuffleConfig(vcShuffleConfig);
+  for (const id of toDelete) {
+    try {
+      const ch = guild.channels.cache.get(id);
+      if (ch) await ch.delete('VC Shuffle session ended');
+    } catch (err) {
+      console.error(`[vc-shuffle] Could not delete temp channel ${id} in guild ${guild.id}:`, err.message);
+    }
+  }
+}
+
+// Move everyone in our temp channels back to the first lobby channel, then delete them
+async function moveEveryoneToLobby(guild, cfg) {
+  if (!cfg.lobbyChannelIds.length) return;
+  const lobby = guild.channels.cache.get(cfg.lobbyChannelIds[0]);
+  if (!lobby) return;
+
+  for (const channelId of cfg.createdChannelIds) {
+    const ch = guild.channels.cache.get(channelId);
+    if (!ch) continue;
+    for (const member of ch.members.values()) {
+      try {
+        await member.voice.setChannel(lobby, 'VC Shuffle: returning to lobby');
+      } catch (err) {
+        console.error(`[vc-shuffle] Could not move member ${member.id} to lobby:`, err.message);
+      }
+    }
+  }
+}
+
+// Core shuffle round: collect pool members, create temp channels, move people
+async function runShuffleRound(guild, guildId) {
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  if (!cfg.enabled) return;
+  if (!cfg.lobbyChannelIds.length) return;
+
+  const state = shuffleState.get(guildId);
+  if (!state) return;
+  state.roundNumber = (state.roundNumber || 0) + 1;
+  const round = state.roundNumber;
+
+  console.log(`[vc-shuffle] Guild ${guildId}: starting round #${round}`);
+
+  // Step 1: move everyone currently in temp channels back to the primary lobby
+  await moveEveryoneToLobby(guild, cfg);
+  await cleanupShuffleChannels(guild, cfg);
+
+  // Step 2: collect all members who are now in any lobby channel
+  const pool = collectPoolMembers(guild, cfg);
+  if (pool.length < 2) {
+    console.log(`[vc-shuffle] Guild ${guildId}: only ${pool.length} member(s) in pool — skipping round, waiting for next interval`);
+    return;
+  }
+
+  // Step 3: split into groups
+  const groups = splitIntoGroups(pool, cfg.minGroupSize, cfg.maxGroupSize);
+
+  // Step 4: for each group, create a temp voice channel and move them in
+  const newChannelIds = [];
+  for (let i = 0; i < groups.length; i++) {
+    const roomName = `Shuffle Room ${i + 1}`;
+    let ch;
+    try {
+      ch = await guild.channels.create({
+        name: roomName,
+        type: ChannelType.GuildVoice,
+        parent: cfg.categoryId || null,
+        reason: `VC Shuffle round #${round}`,
+      });
+      newChannelIds.push(ch.id);
+    } catch (err) {
+      console.error(`[vc-shuffle] Could not create channel "${roomName}" in guild ${guildId}:`, err.message);
+      continue;
+    }
+
+    for (const member of groups[i]) {
+      try {
+        await member.voice.setChannel(ch, `VC Shuffle round #${round}`);
+      } catch (err) {
+        console.error(`[vc-shuffle] Could not move member ${member.id} to ${roomName}:`, err.message);
+      }
+    }
+  }
+
+  cfg.createdChannelIds = newChannelIds;
+  saveVcShuffleConfig(vcShuffleConfig);
+
+  // Step 5: optional announcement
+  if (cfg.announcementChannelId) {
+    try {
+      const textCh = guild.channels.cache.get(cfg.announcementChannelId);
+      if (textCh) {
+        const groupLines = groups.map((g, i) => `**Room ${i + 1}:** ${g.map((m) => m.displayName).join(', ')}`).join('\n');
+        const embed = new EmbedBuilder()
+          .setColor(0x8a2be2)
+          .setTitle(`🔀 VC Shuffle — Round #${round}`)
+          .setDescription(`${pool.length} member(s) shuffled into ${groups.length} group(s)!\n\n${groupLines}`)
+          .setTimestamp();
+        await textCh.send({ embeds: [embed] });
+      }
+    } catch (err) {
+      console.error(`[vc-shuffle] Could not post announcement in guild ${guildId}:`, err.message);
+    }
+  }
+
+  console.log(`[vc-shuffle] Guild ${guildId}: round #${round} complete — ${pool.length} members in ${groups.length} rooms`);
+}
+
+// Pick a random next interval in ms between min and max configured minutes
+function randomIntervalMs(cfg) {
+  const min = (cfg.minIntervalMinutes ?? 5) * 60 * 1000;
+  const max = (cfg.maxIntervalMinutes ?? 10) * 60 * 1000;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// Schedule the next shuffle round for a guild (self-rescheduling)
+function scheduleNextShuffle(guild, guildId) {
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  if (!cfg.enabled) return;
+
+  const delay = randomIntervalMs(cfg);
+  const nextAt = Date.now() + delay;
+
+  const state = shuffleState.get(guildId) || {};
+  if (state.timeoutId) clearTimeout(state.timeoutId);
+
+  const timeoutId = setTimeout(async () => {
+    try {
+      await runShuffleRound(guild, guildId);
+    } catch (err) {
+      console.error(`[vc-shuffle] Uncaught error in shuffle round for guild ${guildId}:`, err.message);
+    }
+    // Reschedule after each round (re-reads config so changes take effect immediately)
+    const freshCfg = ensureVcShuffleGuildConfig(guildId);
+    if (freshCfg.enabled) {
+      scheduleNextShuffle(guild, guildId);
+    } else {
+      shuffleState.delete(guildId);
+    }
+  }, delay);
+
+  shuffleState.set(guildId, { ...state, timeoutId, nextShuffleAt: nextAt });
+  console.log(`[vc-shuffle] Guild ${guildId}: next shuffle in ${Math.round(delay / 1000)}s (at ${new Date(nextAt).toISOString()})`);
+}
+
+// Start shuffle for a guild
+async function startVcShuffle(guild, guildId, runImmediately = false) {
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  cfg.enabled = true;
+  saveVcShuffleConfig(vcShuffleConfig);
+
+  // Clear any existing timer
+  const existing = shuffleState.get(guildId);
+  if (existing?.timeoutId) clearTimeout(existing.timeoutId);
+  shuffleState.set(guildId, { roundNumber: 0 });
+
+  if (runImmediately) {
+    await runShuffleRound(guild, guildId);
+  }
+  scheduleNextShuffle(guild, guildId);
+}
+
+// Stop shuffle for a guild
+async function stopVcShuffle(guild, guildId) {
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  cfg.enabled = false;
+  saveVcShuffleConfig(vcShuffleConfig);
+
+  const state = shuffleState.get(guildId);
+  if (state?.timeoutId) clearTimeout(state.timeoutId);
+  shuffleState.delete(guildId);
+
+  // Move everyone back to lobby then cleanup
+  await moveEveryoneToLobby(guild, cfg);
+  await cleanupShuffleChannels(guild, cfg);
+}
+
+// Re-arm shuffles on bot restart for any guild that had it enabled
+client.once('clientReady', () => {
+  for (const [guildId, cfg] of Object.entries(vcShuffleConfig)) {
+    if (!cfg.enabled) continue;
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) continue;
+    console.log(`[vc-shuffle] Resuming shuffle for guild ${guildId}`);
+    shuffleState.set(guildId, { roundNumber: 0 });
+    scheduleNextShuffle(guild, guildId);
+  }
+});
+
 // ---- Slash command definitions ----
 const commands = [
   new SlashCommandBuilder()
@@ -1590,6 +1760,56 @@ const commands = [
         .setDescription("Manually check one member's activity status")
         .addUserOption((opt) => opt.setName('user').setDescription('Member to check').setRequired(true))
     ),
+  new SlashCommandBuilder()
+    .setName('vc-shuffle')
+    .setDescription('Randomly shuffle voice channel members into small groups every 5–10 minutes')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((sub) =>
+      sub
+        .setName('start')
+        .setDescription('Start the VC shuffle session (runs the first shuffle immediately)')
+    )
+    .addSubcommand((sub) => sub.setName('stop').setDescription('Stop the VC shuffle session and clean up temp channels'))
+    .addSubcommand((sub) => sub.setName('status').setDescription('Show current shuffle configuration and state'))
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-group-size')
+        .setDescription('Set the min and max members per shuffle group (default: 2–5)')
+        .addIntegerOption((opt) => opt.setName('min').setDescription('Minimum group size').setRequired(true).setMinValue(2).setMaxValue(10))
+        .addIntegerOption((opt) => opt.setName('max').setDescription('Maximum group size').setRequired(true).setMinValue(2).setMaxValue(20))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-interval')
+        .setDescription('Set the min and max shuffle interval in minutes (default: 5–10)')
+        .addIntegerOption((opt) => opt.setName('min').setDescription('Minimum minutes between shuffles').setRequired(true).setMinValue(1).setMaxValue(60))
+        .addIntegerOption((opt) => opt.setName('max').setDescription('Maximum minutes between shuffles').setRequired(true).setMinValue(1).setMaxValue(60))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('add-lobby')
+        .setDescription('Add a voice channel to the shuffle pool (members here are eligible to be shuffled)')
+        .addChannelOption((opt) => opt.setName('channel').setDescription('Voice channel to add as a lobby/pool source').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('remove-lobby')
+        .setDescription('Remove a voice channel from the shuffle pool')
+        .addChannelOption((opt) => opt.setName('channel').setDescription('Voice channel to remove').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-category')
+        .setDescription('Set the category where temp shuffle rooms are created (leave unset for top-level)')
+        .addChannelOption((opt) => opt.setName('category').setDescription('Category channel').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-announce')
+        .setDescription('Set a text channel to post shuffle round announcements in')
+        .addChannelOption((opt) => opt.setName('channel').setDescription('Text channel for announcements').setRequired(true))
+    )
+    .addSubcommand((sub) => sub.setName('shuffle-now').setDescription('Run a shuffle round immediately (without waiting for the next interval)')),
 ].map((cmd) => cmd.toJSON());
 
 // ---- Register slash commands with Discord (GLOBAL = works in every server
@@ -2201,6 +2421,140 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ============================================================
+// VC Shuffle — slash command interaction handler
+// ============================================================
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand() || interaction.commandName !== 'vc-shuffle') return;
+
+  const sub = interaction.options.getSubcommand();
+  const guildId = interaction.guildId;
+  const guild = interaction.guild;
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+
+  try {
+    if (sub === 'start') {
+      if (!cfg.lobbyChannelIds.length) {
+        return interaction.reply({ content: '❌ Add at least one lobby/pool channel first with `/vc-shuffle add-lobby`.', flags: MessageFlags.Ephemeral });
+      }
+      await interaction.deferReply();
+      await startVcShuffle(guild, guildId, true);
+      const state = shuffleState.get(guildId);
+      const nextIn = state?.nextShuffleAt ? Math.round((state.nextShuffleAt - Date.now()) / 1000 / 60) : '?';
+      await interaction.editReply(`🔀 **VC Shuffle started!** First round complete. Next shuffle in ~${nextIn} minute(s). Use \`/vc-shuffle stop\` to end the session.`);
+    }
+
+    else if (sub === 'stop') {
+      await interaction.deferReply();
+      await stopVcShuffle(guild, guildId);
+      await interaction.editReply(`⏹️ **VC Shuffle stopped.** Everyone's been moved back to the lobby and temp rooms deleted.`);
+    }
+
+    else if (sub === 'shuffle-now') {
+      await interaction.deferReply();
+      await runShuffleRound(guild, guildId);
+      await interaction.editReply(`🔀 **Shuffle triggered manually!** Check the announcement channel (if set) for the room assignments.`);
+    }
+
+    else if (sub === 'status') {
+      const state = shuffleState.get(guildId);
+      const nextIn = state?.nextShuffleAt ? `<t:${Math.floor(state.nextShuffleAt / 1000)}:R>` : 'N/A';
+      const embed = new EmbedBuilder()
+        .setColor(cfg.enabled ? 0x8a2be2 : 0x999999)
+        .setTitle('🔀 VC Shuffle Status')
+        .addFields(
+          { name: 'Running', value: cfg.enabled ? '🟢 Yes' : '🔴 No', inline: true },
+          { name: 'Round #', value: String(state?.roundNumber ?? 0), inline: true },
+          { name: 'Next shuffle', value: cfg.enabled ? nextIn : 'Not scheduled', inline: true },
+          { name: 'Group size', value: `${cfg.minGroupSize}–${cfg.maxGroupSize} people`, inline: true },
+          { name: 'Interval', value: `${cfg.minIntervalMinutes}–${cfg.maxIntervalMinutes} minutes`, inline: true },
+          { name: 'Temp rooms created', value: String(cfg.createdChannelIds.length), inline: true },
+          { name: 'Lobby/pool channels', value: cfg.lobbyChannelIds.length ? cfg.lobbyChannelIds.map((id) => `<#${id}>`).join(', ') : 'None set', inline: false },
+          { name: 'Announcement channel', value: cfg.announcementChannelId ? `<#${cfg.announcementChannelId}>` : 'Not set', inline: true },
+          { name: 'Temp room category', value: cfg.categoryId ? `<#${cfg.categoryId}>` : 'Top-level (no category)', inline: true },
+        );
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+    }
+
+    else if (sub === 'set-group-size') {
+      const min = interaction.options.getInteger('min');
+      const max = interaction.options.getInteger('max');
+      if (min > max) {
+        return interaction.reply({ content: '❌ Min must be ≤ max.', flags: MessageFlags.Ephemeral });
+      }
+      cfg.minGroupSize = min;
+      cfg.maxGroupSize = max;
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ Group size set to **${min}–${max}** people per room.`);
+    }
+
+    else if (sub === 'set-interval') {
+      const min = interaction.options.getInteger('min');
+      const max = interaction.options.getInteger('max');
+      if (min > max) {
+        return interaction.reply({ content: '❌ Min must be ≤ max.', flags: MessageFlags.Ephemeral });
+      }
+      cfg.minIntervalMinutes = min;
+      cfg.maxIntervalMinutes = max;
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ Shuffle interval set to **${min}–${max}** minutes (randomized each round).`);
+    }
+
+    else if (sub === 'add-lobby') {
+      const channel = interaction.options.getChannel('channel');
+      if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildStageVoice) {
+        return interaction.reply({ content: '❌ That needs to be a voice channel.', flags: MessageFlags.Ephemeral });
+      }
+      if (cfg.lobbyChannelIds.includes(channel.id)) {
+        return interaction.reply({ content: `**${channel.name}** is already a lobby channel.`, flags: MessageFlags.Ephemeral });
+      }
+      cfg.lobbyChannelIds.push(channel.id);
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ **${channel.name}** added as a lobby/pool channel — members in here will be eligible for shuffling.`);
+    }
+
+    else if (sub === 'remove-lobby') {
+      const channel = interaction.options.getChannel('channel');
+      if (!cfg.lobbyChannelIds.includes(channel.id)) {
+        return interaction.reply({ content: `**${channel.name}** isn't a lobby channel.`, flags: MessageFlags.Ephemeral });
+      }
+      cfg.lobbyChannelIds = cfg.lobbyChannelIds.filter((id) => id !== channel.id);
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ **${channel.name}** removed from the shuffle pool.`);
+    }
+
+    else if (sub === 'set-category') {
+      const channel = interaction.options.getChannel('category');
+      if (channel.type !== ChannelType.GuildCategory) {
+        return interaction.reply({ content: '❌ That needs to be a category, not a voice or text channel.', flags: MessageFlags.Ephemeral });
+      }
+      cfg.categoryId = channel.id;
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ Temp shuffle rooms will be created inside **${channel.name}**.`);
+    }
+
+    else if (sub === 'set-announce') {
+      const channel = interaction.options.getChannel('channel');
+      if (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildAnnouncement) {
+        return interaction.reply({ content: '❌ That needs to be a text channel.', flags: MessageFlags.Ephemeral });
+      }
+      cfg.announcementChannelId = channel.id;
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ Shuffle round announcements will be posted in <#${channel.id}>.`);
+    }
+
+  } catch (err) {
+    console.error('[vc-shuffle] Interaction error:', err);
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply('Something went wrong with the shuffle command — check the terminal.');
+      } else {
+        await interaction.reply({ content: 'Something went wrong — check the terminal.', flags: MessageFlags.Ephemeral });
+      }
+    } catch { /* best effort */ }
+  }
+});
+
+// ============================================================
 // Cameras-On voice channel policy — enforcement
 // ============================================================
 // Two-stage, low-noise design:
@@ -2375,27 +2729,6 @@ process.on('unhandledRejection', (err) => {
 const express = require('express');
 const session = require('express-session');
 const FileStore = require('session-file-store')(session);
-const multer = require('multer');
-
-// Multer storage — saves uploads directly to the vc-sounds volume folder
-const soundUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, VC_SOUNDS_DIR),
-    filename: (req, file, cb) => {
-      // Sanitize filename — strip path traversal chars, keep extension
-      const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-      cb(null, safe);
-    },
-  }),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max per file
-  fileFilter: (req, file, cb) => {
-    const allowed = /\.(mp3|wav|ogg|opus|flac)$/i;
-    if (!allowed.test(file.originalname)) {
-      return cb(new Error('Only .mp3, .wav, .ogg, .opus, and .flac files are allowed.'));
-    }
-    cb(null, true);
-  },
-});
 const crypto = require('crypto');
 
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD;
@@ -2475,7 +2808,7 @@ function renderLayout({ title, guildId, currentPath, body, flash }) {
     { path: '/camera', label: 'Camera Policy' },
     { path: '/activity', label: 'Activity Tracker' },
     { path: '/channel-index', label: 'Channel Index' },
-    { path: '/vc-sounds', label: 'VC Sounds' },
+    { path: '/vc-shuffle', label: 'VC Shuffle' },
   ];
 
   return `<!DOCTYPE html>
@@ -2674,6 +3007,23 @@ app.get('/', async (req, res) => {
         <div class="stat"><div class="num">${descFilled}/${totalChannels}</div><div class="label">Descriptions filled in</div></div>
       </div>
       <p style="margin-top:12px;"><a href="/channel-index?guild=${guildId}">Configure →</a></p>
+    </div>
+
+    <div class="card">
+      <h3>🔀 VC Shuffle</h3>
+      ${(() => {
+        const shuffleCfg = ensureVcShuffleGuildConfig(guildId);
+        const shuffleStateVal = shuffleState.get(guildId);
+        const poolSize = collectPoolMembers(guild, shuffleCfg).length;
+        return `<p><span class="pill ${shuffleCfg.enabled ? 'on' : 'off'}">${shuffleCfg.enabled ? 'RUNNING' : 'STOPPED'}</span></p>
+      <div class="stat-grid">
+        <div class="stat"><div class="num">${shuffleStateVal?.roundNumber ?? 0}</div><div class="label">Rounds</div></div>
+        <div class="stat"><div class="num">${poolSize}</div><div class="label">Pool size now</div></div>
+        <div class="stat"><div class="num">${shuffleCfg.minIntervalMinutes}–${shuffleCfg.maxIntervalMinutes}m</div><div class="label">Interval</div></div>
+        <div class="stat"><div class="num">${shuffleCfg.minGroupSize}–${shuffleCfg.maxGroupSize}</div><div class="label">Group size</div></div>
+      </div>`;
+      })()}
+      <p style="margin-top:12px;"><a href="/vc-shuffle?guild=${guildId}">Configure →</a></p>
     </div>
   `;
   res.send(renderLayout({ title: 'Overview', guildId, currentPath: '/', body, flash: req.query.flash }));
@@ -3167,216 +3517,131 @@ app.post('/channel-index/save-descriptions', (req, res) => {
   res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('Descriptions saved.')}`);
 });
 
-// ---- VC Sounds Dashboard ----
-app.get('/vc-sounds', (req, res) => {
-  const guildId = req.query.guild || req.session.lastGuildId;
-  if (!guildId) return res.redirect('/');
-  req.session.lastGuildId = guildId;
+// ---- VC Shuffle Dashboard ----
+app.get('/vc-shuffle', (req, res) => {
+  const guildId = resolveGuildId(req);
   const guild = client.guilds.cache.get(guildId);
   if (!guild) return res.redirect('/');
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  const state = shuffleState.get(guildId);
 
-  const cfg = ensureVcSoundGuildConfig(guildId);
+  const voiceChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice).values()].sort((a, b) => a.rawPosition - b.rawPosition);
+  const textChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement).values()].sort((a, b) => a.rawPosition - b.rawPosition);
+  const categories = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildCategory).values()].sort((a, b) => a.rawPosition - b.rawPosition);
 
-  // List available sound files
-  const soundFiles = fs.existsSync(VC_SOUNDS_DIR)
-    ? fs.readdirSync(VC_SOUNDS_DIR).filter((f) => f.match(/\.(mp3|wav|ogg|opus|flac)$/i))
-    : [];
+  const nextIn = state?.nextShuffleAt ? new Date(state.nextShuffleAt).toLocaleString() : 'N/A';
+  const poolSize = collectPoolMembers(guild, cfg).length;
 
-  const soundOptions = soundFiles.map((f) => `<option value="${f}">${f}</option>`).join('');
-  const soundOptionsNone = `<option value="">-- none --</option>${soundOptions}`;
+  const lobbyChecklist = voiceChannels.map((c) =>
+    `<label class="check-item"><input type="checkbox" name="lobbyChannelIds" value="${c.id}" ${cfg.lobbyChannelIds.includes(c.id) ? 'checked' : ''}> 🔊 ${escapeHtml(c.name)}</label>`
+  ).join('') || '<p class="muted">No voice channels found.</p>';
 
-  // Build public URL base for hosted sound links
-  const publicBase = process.env.RAILWAY_PUBLIC_DOMAIN
-    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/vc-sounds/files`
-    : null;
+  const categoryOptions = `<option value="">-- top-level (no category) --</option>` +
+    categories.map((c) => `<option value="${c.id}" ${cfg.categoryId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
 
-  const fileList = soundFiles.length > 0
-    ? soundFiles.map((f) => {
-        const publicUrl = publicBase ? `${publicBase}/${encodeURIComponent(f)}` : null;
-        return `
-          <tr>
-            <td>${escapeHtml(f)}</td>
-            <td>${publicUrl ? `<a href="${publicUrl}" target="_blank" style="font-family:monospace;font-size:12px;">${publicUrl}</a>` : '<span class="muted">Set RAILWAY_PUBLIC_DOMAIN env var to get links</span>'}</td>
-            <td>
-              <form method="POST" action="/vc-sounds/delete-file" style="margin:0;">
-                <input type="hidden" name="guild" value="${guildId}">
-                <input type="hidden" name="filename" value="${escapeHtml(f)}">
-                <button class="danger" type="submit" onclick="return confirm('Delete ${escapeHtml(f)}?')" style="padding:3px 10px;font-size:12px;">Delete</button>
-              </form>
-            </td>
-          </tr>`;
-      }).join('')
-    : '<tr><td colspan="3" class="muted">No files uploaded yet.</td></tr>';
-
-  const memberRows = guild.members.cache
-    .filter((m) => !m.user.bot)
-    .map((m) => {
-      const ms = cfg.memberSounds?.[m.id] || {};
-      return `
-        <tr>
-          <td>${escapeHtml(m.displayName)}</td>
-          <td>
-            <select name="join_${m.id}">
-              ${soundFiles.map((f) => `<option value="${f}" ${ms.join === f ? 'selected' : ''}>${f}</option>`).join('')}
-              <option value="" ${!ms.join ? 'selected' : ''}>-- none --</option>
-            </select>
-          </td>
-          <td>
-            <select name="leave_${m.id}">
-              ${soundFiles.map((f) => `<option value="${f}" ${ms.leave === f ? 'selected' : ''}>${f}</option>`).join('')}
-              <option value="" ${!ms.leave ? 'selected' : ''}>-- none --</option>
-            </select>
-          </td>
-        </tr>`;
-    })
-    .join('');
+  const announceOptions = `<option value="">-- none --</option>` +
+    textChannels.map((c) => `<option value="${c.id}" ${cfg.announcementChannelId === c.id ? 'selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
 
   const body = `
     <div class="card">
-      <h2>🔊 VC Sounds — ${escapeHtml(guild.name)}</h2>
-      <p class="muted">Upload audio files here to use as join/leave sounds for the bot. Uploaded files also get a public URL you can paste directly into the Equicord VCEntrance plugin!!</p>
+      <h2>🔀 VC Shuffle — ${escapeHtml(guild.name)}</h2>
+      <p><span class="pill ${cfg.enabled ? 'on' : 'off'}">${cfg.enabled ? 'RUNNING' : 'STOPPED'}</span></p>
+      <div class="stat-grid">
+        <div class="stat"><div class="num">${state?.roundNumber ?? 0}</div><div class="label">Rounds completed</div></div>
+        <div class="stat"><div class="num">${poolSize}</div><div class="label">Members in pool now</div></div>
+        <div class="stat"><div class="num">${cfg.createdChannelIds.length}</div><div class="label">Active temp rooms</div></div>
+        <div class="stat"><div class="num">${cfg.minIntervalMinutes}–${cfg.maxIntervalMinutes}m</div><div class="label">Interval</div></div>
+        <div class="stat"><div class="num">${cfg.minGroupSize}–${cfg.maxGroupSize}</div><div class="label">Group size</div></div>
+      </div>
+      ${cfg.enabled ? `<p class="muted">Next shuffle at: ${nextIn}</p>` : ''}
+      <div class="btn-row">
+        <form method="POST" action="/vc-shuffle/start"><input type="hidden" name="guild" value="${guildId}"><button type="submit" ${cfg.enabled ? 'disabled style="opacity:0.5;"' : ''}>▶️ Start</button></form>
+        <form method="POST" action="/vc-shuffle/stop"><input type="hidden" name="guild" value="${guildId}"><button class="danger" type="submit" ${!cfg.enabled ? 'disabled style="opacity:0.5;"' : ''}>⏹️ Stop</button></form>
+        <form method="POST" action="/vc-shuffle/shuffle-now"><input type="hidden" name="guild" value="${guildId}"><button class="secondary" type="submit">🔀 Shuffle Now</button></form>
+      </div>
     </div>
 
     <div class="card">
-      <h3>📁 Upload Sound Files</h3>
-      <p class="muted">Accepted: .mp3, .wav, .ogg, .opus, .flac — max 10MB each</p>
-      <form method="POST" action="/vc-sounds/upload" enctype="multipart/form-data">
+      <form method="POST" action="/vc-shuffle/save-settings">
         <input type="hidden" name="guild" value="${guildId}">
-        <div class="field">
-          <input type="file" name="sounds" accept=".mp3,.wav,.ogg,.opus,.flac" multiple style="margin-bottom:8px;">
+        <h3>Timing &amp; Group Size</h3>
+        <div class="row">
+          <div class="field"><label>Min interval (minutes)</label><input type="number" name="minIntervalMinutes" min="1" max="60" value="${cfg.minIntervalMinutes ?? 5}"></div>
+          <div class="field"><label>Max interval (minutes)</label><input type="number" name="maxIntervalMinutes" min="1" max="60" value="${cfg.maxIntervalMinutes ?? 10}"></div>
+          <div class="field"><label>Min group size</label><input type="number" name="minGroupSize" min="2" max="10" value="${cfg.minGroupSize ?? 2}"></div>
+          <div class="field"><label>Max group size</label><input type="number" name="maxGroupSize" min="2" max="20" value="${cfg.maxGroupSize ?? 5}"></div>
         </div>
-        <div class="btn-row"><button type="submit">⬆️ Upload</button></div>
+        <h3>Temp Room Category</h3>
+        <div class="field"><label>Category for shuffle rooms</label><select name="categoryId">${categoryOptions}</select></div>
+        <h3>Announcement Channel</h3>
+        <div class="field"><label>Post round results here</label><select name="announcementChannelId">${announceOptions}</select></div>
+        <div class="btn-row"><button type="submit">💾 Save Settings</button></div>
       </form>
     </div>
 
     <div class="card">
-      <h3>🗂️ Uploaded Files</h3>
-      ${publicBase ? `<p class="muted">Copy a URL below to use in the Equicord VCEntrance plugin settings!!</p>` : `<p class="muted">⚠️ Add <code>RAILWAY_PUBLIC_DOMAIN</code> as a Railway environment variable (e.g. <code>g33ky-bot-production.up.railway.app</code>) to get public URLs for the Equicord plugin.</p>`}
-      <table>
-        <thead><tr><th>File</th><th>Public URL</th><th></th></tr></thead>
-        <tbody>${fileList}</tbody>
-      </table>
-    </div>
-
-    <div class="card">
-      <h3>Global Settings</h3>
-      <form method="POST" action="/vc-sounds/save-global">
+      <form method="POST" action="/vc-shuffle/save-lobbies">
         <input type="hidden" name="guild" value="${guildId}">
-        <div class="field">
-          <label>VC Sounds enabled?</label>
-          <select name="enabled">
-            <option value="true" ${cfg.enabled ? 'selected' : ''}>Yes</option>
-            <option value="false" ${!cfg.enabled ? 'selected' : ''}>No</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>Default join sound <span class="muted">(plays for members with no custom sound)</span></label>
-          <select name="defaultJoinSound">${soundOptionsNone.replace(`value="${cfg.defaultJoinSound}"`, `value="${cfg.defaultJoinSound}" selected`)}</select>
-        </div>
-        <div class="field">
-          <label>Default leave sound</label>
-          <select name="defaultLeaveSound">${soundOptionsNone.replace(`value="${cfg.defaultLeaveSound}"`, `value="${cfg.defaultLeaveSound}" selected`)}</select>
-        </div>
-        <div class="btn-row"><button type="submit">💾 Save Global Settings</button></div>
-      </form>
-    </div>
-
-    <div class="card">
-      <h3>Per-Member Custom Sounds</h3>
-      ${soundFiles.length === 0 ? '<p class="muted">⚠️ No sound files found. Upload .mp3/.wav/.ogg files to the <code>vc-sounds/</code> folder on your Railway volume to get started.</p>' : ''}
-      <form method="POST" action="/vc-sounds/save-members">
-        <input type="hidden" name="guild" value="${guildId}">
-        <table>
-          <thead><tr><th>Member</th><th>Join Sound</th><th>Leave Sound</th></tr></thead>
-          <tbody>${memberRows}</tbody>
-        </table>
-        <div class="btn-row"><button type="submit">💾 Save Member Sounds</button></div>
+        <h3>Lobby / Pool Channels</h3>
+        <p class="muted">Members in these channels are pooled together and shuffled into temp rooms. Add the channel(s) people gather in before a shuffle session starts.</p>
+        <div class="checklist">${lobbyChecklist}</div>
+        <div class="btn-row"><button type="submit">💾 Save Lobbies</button></div>
       </form>
     </div>
   `;
 
-  res.send(renderLayout({ title: 'VC Sounds', guildId, currentPath: '/vc-sounds', body, flash: req.query.flash }));
+  res.send(renderLayout({ title: 'VC Shuffle', guildId, currentPath: '/vc-shuffle', body, flash: req.query.flash }));
 });
 
-app.post('/vc-sounds/save-global', (req, res) => {
-  const { guild: guildId, enabled, defaultJoinSound, defaultLeaveSound } = req.body;
+app.post('/vc-shuffle/save-settings', (req, res) => {
+  const { guild: guildId, minIntervalMinutes, maxIntervalMinutes, minGroupSize, maxGroupSize, categoryId, announcementChannelId } = req.body;
   if (!guildId) return res.redirect('/');
-  const cfg = ensureVcSoundGuildConfig(guildId);
-  cfg.enabled = enabled === 'true';
-  cfg.defaultJoinSound = defaultJoinSound || null;
-  cfg.defaultLeaveSound = defaultLeaveSound || null;
-  saveVcSoundConfig(vcSoundConfig);
-  res.redirect(`/vc-sounds?guild=${guildId}&flash=${encodeURIComponent('Global VC sound settings saved!')}`);
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  cfg.minIntervalMinutes = Math.max(1, parseInt(minIntervalMinutes, 10) || 5);
+  cfg.maxIntervalMinutes = Math.max(cfg.minIntervalMinutes, parseInt(maxIntervalMinutes, 10) || 10);
+  cfg.minGroupSize = Math.max(2, parseInt(minGroupSize, 10) || 2);
+  cfg.maxGroupSize = Math.max(cfg.minGroupSize, parseInt(maxGroupSize, 10) || 5);
+  cfg.categoryId = categoryId || null;
+  cfg.announcementChannelId = announcementChannelId || null;
+  saveVcShuffleConfig(vcShuffleConfig);
+  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Shuffle settings saved!')}`);
 });
 
-app.post('/vc-sounds/save-members', (req, res) => {
-  const { guild: guildId, ...rest } = req.body;
+app.post('/vc-shuffle/save-lobbies', (req, res) => {
+  const { guild: guildId, lobbyChannelIds } = req.body;
   if (!guildId) return res.redirect('/');
-  const cfg = ensureVcSoundGuildConfig(guildId);
-  if (!cfg.memberSounds) cfg.memberSounds = {};
-
-  for (const [key, value] of Object.entries(rest)) {
-    const joinMatch = key.match(/^join_(\d+)$/);
-    const leaveMatch = key.match(/^leave_(\d+)$/);
-    if (joinMatch) {
-      const userId = joinMatch[1];
-      if (!cfg.memberSounds[userId]) cfg.memberSounds[userId] = {};
-      cfg.memberSounds[userId].join = value || null;
-    }
-    if (leaveMatch) {
-      const userId = leaveMatch[1];
-      if (!cfg.memberSounds[userId]) cfg.memberSounds[userId] = {};
-      cfg.memberSounds[userId].leave = value || null;
-    }
-  }
-
-  // Clean up members with no sounds set
-  for (const [userId, sounds] of Object.entries(cfg.memberSounds)) {
-    if (!sounds.join && !sounds.leave) delete cfg.memberSounds[userId];
-  }
-
-  saveVcSoundConfig(vcSoundConfig);
-  res.redirect(`/vc-sounds?guild=${guildId}&flash=${encodeURIComponent('Member sounds saved!')}`);
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  cfg.lobbyChannelIds = asArray(lobbyChannelIds);
+  saveVcShuffleConfig(vcShuffleConfig);
+  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Lobby channels saved!')}`);
 });
 
-// Serve uploaded sound files publicly so Equicord plugin can use the URLs
-app.use('/vc-sounds/files', express.static(VC_SOUNDS_DIR));
-
-// Upload one or more sound files
-app.post('/vc-sounds/upload', (req, res) => {
-  const guildId = req.query.guild || req.body?.guild;
-  soundUpload.array('sounds', 20)(req, res, (err) => {
-    const guild = req.body?.guild || guildId;
-    if (err) {
-      return res.redirect(`/vc-sounds?guild=${guild}&flash=${encodeURIComponent('Upload failed: ' + err.message)}`);
-    }
-    const count = req.files?.length ?? 0;
-    res.redirect(`/vc-sounds?guild=${guild}&flash=${encodeURIComponent(count > 0 ? `Uploaded ${count} file(s)!` : 'No files uploaded.')}`);
-  });
+app.post('/vc-shuffle/start', async (req, res) => {
+  const { guild: guildId } = req.body;
+  if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  if (!cfg.lobbyChannelIds.length) {
+    return res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Add at least one lobby channel first.')}`);
+  }
+  await startVcShuffle(guild, guildId, true);
+  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Shuffle started!')}`);
 });
 
-// Delete a sound file
-app.post('/vc-sounds/delete-file', (req, res) => {
-  const { guild: guildId, filename } = req.body;
-  if (!filename) return res.redirect(`/vc-sounds?guild=${guildId}`);
-  const safe = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const fullPath = require('path').join(VC_SOUNDS_DIR, safe);
-  try {
-    if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
-    // Also clear any configs referencing this file
-    for (const cfg of Object.values(vcSoundConfig)) {
-      if (cfg.defaultJoinSound === safe) cfg.defaultJoinSound = null;
-      if (cfg.defaultLeaveSound === safe) cfg.defaultLeaveSound = null;
-      for (const ms of Object.values(cfg.memberSounds || {})) {
-        if (ms.join === safe) ms.join = null;
-        if (ms.leave === safe) ms.leave = null;
-      }
-    }
-    saveVcSoundConfig(vcSoundConfig);
-    res.redirect(`/vc-sounds?guild=${guildId}&flash=${encodeURIComponent(`Deleted ${safe}.`)}`);
-  } catch (err) {
-    res.redirect(`/vc-sounds?guild=${guildId}&flash=${encodeURIComponent('Delete failed: ' + err.message)}`);
-  }
+app.post('/vc-shuffle/stop', async (req, res) => {
+  const { guild: guildId } = req.body;
+  if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  await stopVcShuffle(guild, guildId);
+  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Shuffle stopped. Temp rooms cleaned up.')}`);
+});
+
+app.post('/vc-shuffle/shuffle-now', async (req, res) => {
+  const { guild: guildId } = req.body;
+  if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  await runShuffleRound(guild, guildId);
+  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Manual shuffle complete!')}`);
 });
 
 app.listen(PORT, () => {
