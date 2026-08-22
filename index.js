@@ -300,7 +300,7 @@ function finalizeActivityVoiceSession(guildId, userId, key) {
   }
 }
 
-client.on('voiceStateUpdate', (oldState, newState) => {
+client.on('voiceStateUpdate', async (oldState, newState) => {
   const guildId = newState.guild.id;
   const userId = newState.id;
   const key = `${guildId}:${userId}`;
@@ -314,6 +314,20 @@ client.on('voiceStateUpdate', (oldState, newState) => {
   } else if (wasInChannel && nowInChannel && oldState.channelId !== newState.channelId) {
     finalizeActivityVoiceSession(guildId, userId, key);
     activityVoiceSessions.set(key, { joinedAt: Date.now(), channelId: newState.channelId });
+  }
+
+  // Speed dating: assign participant role when someone joins a lobby during an active session
+  if (nowInChannel && newState.member && !newState.member.user.bot) {
+    const shuffleCfg = vcShuffleConfig[guildId];
+    if (shuffleCfg?.enabled && shuffleCfg.participantRoleId && shuffleCfg.lobbyChannelIds?.includes(newState.channelId)) {
+      try {
+        if (!newState.member.roles.cache.has(shuffleCfg.participantRoleId)) {
+          await newState.member.roles.add(shuffleCfg.participantRoleId, 'Speed Dating: joined lobby');
+        }
+      } catch (err) {
+        console.error(`[vc-shuffle] Could not auto-assign participant role to ${userId}:`, err.message);
+      }
+    }
   }
 });
 
@@ -1319,27 +1333,56 @@ function ensureVcShuffleGuildConfig(guildId) {
       enabled: false,
       lobbyChannelIds: [],    // channels whose current members are pooled for shuffling
       categoryId: null,       // category to create temp rooms in (null = top-level)
-      minGroupSize: 2,
-      maxGroupSize: 5,
-      minIntervalMinutes: 5,
-      maxIntervalMinutes: 10,
+      // Speed dating defaults: 1-on-1, 3-minute rounds
+      minGroupSize: 1,
+      maxGroupSize: 1,
+      minIntervalMinutes: 3,
+      maxIntervalMinutes: 3,
       announcementChannelId: null, // optional text channel for shuffle announcements
       createdChannelIds: [],   // temp voice channels we made, so we can clean them up
+      // Speed dating extras
+      participantRoleId: null,    // role assigned when someone joins a lobby; applied to all temp rooms
+      staffRoleIds: [],           // staff roles that always get access to temp rooms
+      botRoleId: null,            // bot's own managed role for temp room perms
+      warningSeconds: 30,         // how many seconds before bell to post the wrap-up warning
     };
     saveVcShuffleConfig(vcShuffleConfig);
   }
+  // Normalize configs saved before speed-dating fields existed
   if (!vcShuffleConfig[guildId].announcementChannelId) {
     vcShuffleConfig[guildId].announcementChannelId = null;
   }
   if (!vcShuffleConfig[guildId].createdChannelIds) {
     vcShuffleConfig[guildId].createdChannelIds = [];
   }
+  if (vcShuffleConfig[guildId].participantRoleId === undefined) {
+    vcShuffleConfig[guildId].participantRoleId = null;
+  }
+  if (!vcShuffleConfig[guildId].staffRoleIds) {
+    vcShuffleConfig[guildId].staffRoleIds = [];
+  }
+  if (vcShuffleConfig[guildId].botRoleId === undefined) {
+    vcShuffleConfig[guildId].botRoleId = null;
+  }
+  if (vcShuffleConfig[guildId].warningSeconds === undefined) {
+    vcShuffleConfig[guildId].warningSeconds = 30;
+  }
   return vcShuffleConfig[guildId];
 }
 
 // In-memory shuffle state per guild
-// guildId -> { intervalId, nextShuffleAt, roundNumber }
+// guildId -> { timeoutId, warningTimeoutId, nextShuffleAt, roundNumber, pairHistory: Set<"id1:id2"> }
+// pairHistory tracks every pair that has already chatted this session so we avoid rematching them.
 const shuffleState = new Map();
+
+// Bell rotation — one fires each round so it never gets old
+const BELL_MESSAGES = [
+  '🔔 **Time\'s up!** The bell rings — moving everyone to fresh connections...',
+  '🔔 **Ding ding!** Round over — rotating to new conversations...',
+  '🔔 **Bell\'s ringing!** Hope it was good. Shuffling you into something new...',
+  '🔔 **Connection complete.** Time to meet someone new — rotating now...',
+  '🔔 **Round over!** Wrapping up and moving on — see you on the flip side...',
+];
 
 // Fisher-Yates shuffle
 function shuffleArray(arr) {
@@ -1361,7 +1404,6 @@ function splitIntoGroups(members, minSize, maxSize) {
   while (i < shuffled.length) {
     const remaining = shuffled.length - i;
     if (remaining <= maxSize) {
-      // absorb whatever's left into one final group
       groups.push(shuffled.slice(i));
       break;
     }
@@ -1370,6 +1412,140 @@ function splitIntoGroups(members, minSize, maxSize) {
     i += size;
   }
   return groups;
+}
+
+// Canonical pair key — always smaller id first so "A:B" and "B:A" are the same
+function pairKey(a, b) {
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
+
+// Speed-dating pairing: respects anti-repeat history, handles odd overflow as trios.
+// groupSize = target people per room (1 = 1-on-1 → creates pairs; 2 = 2v2; 3 = 3v3)
+// pairHistory = Set of already-used pair keys for this session
+function speedDatePair(members, groupSize, pairHistory) {
+  // For 1-on-1: pair people trying to avoid anyone they've already spoken to.
+  // For larger groups: use the generic splitter (history still recorded after).
+  if (groupSize >= 2) {
+    return splitIntoGroups(members, groupSize, groupSize);
+  }
+
+  // 1-on-1 mode: Hungarian-style greedy with anti-repeat preference
+  const pool = shuffleArray(members); // random starting order
+  const paired = new Set();
+  const groups = [];
+
+  for (let i = 0; i < pool.length; i++) {
+    if (paired.has(pool[i].id)) continue;
+    // Find the first unpaired partner we haven't already met
+    let partner = null;
+    for (let j = i + 1; j < pool.length; j++) {
+      if (paired.has(pool[j].id)) continue;
+      if (!pairHistory.has(pairKey(pool[i].id, pool[j].id))) {
+        partner = pool[j];
+        break;
+      }
+    }
+    // Fallback: if everyone is already a repeat, just grab the next unpaired person
+    if (!partner) {
+      for (let j = i + 1; j < pool.length; j++) {
+        if (!paired.has(pool[j].id)) {
+          partner = pool[j];
+          break;
+        }
+      }
+    }
+    if (partner) {
+      paired.add(pool[i].id);
+      paired.add(partner.id);
+      groups.push([pool[i], partner]);
+    }
+  }
+
+  // Odd person out: fold them into the last group as a trio
+  const unpaired = pool.filter((m) => !paired.has(m.id));
+  if (unpaired.length && groups.length > 0) {
+    groups[groups.length - 1].push(...unpaired);
+  } else if (unpaired.length) {
+    // Edge case: only 1 person in the whole pool — put them alone
+    groups.push(unpaired);
+  }
+
+  return groups;
+}
+
+// Record every pair in a completed group into the session history
+function recordPairs(group, pairHistory) {
+  for (let i = 0; i < group.length; i++) {
+    for (let j = i + 1; j < group.length; j++) {
+      pairHistory.add(pairKey(group[i].id, group[j].id));
+    }
+  }
+}
+
+// Build the permission overwrites array for a temp speed-dating room.
+// participantRoleId gets standard VC perms. staffRoleIds get the same.
+// botRoleId gets full manage perms. @everyone is denied unless there's no participant role.
+function buildRoomPermissions(guild, cfg) {
+  const { PermissionFlagsBits: PF } = require('discord.js');
+  const overwrites = [];
+
+  // Participant role — the main access gate
+  if (cfg.participantRoleId) {
+    overwrites.push({
+      id: cfg.participantRoleId,
+      allow: [
+        PF.ViewChannel,
+        PF.Connect,
+        PF.Speak,
+        PF.Stream,
+        PF.UseEmbeddedActivities,
+        PF.UseSoundboard,
+        PF.UseVAD,
+        PF.RequestToSpeak,
+      ],
+    });
+    // Deny @everyone — only participants can enter
+    overwrites.push({
+      id: guild.id,
+      deny: [PF.ViewChannel, PF.Connect],
+    });
+  }
+
+  // Staff roles — same access as participants
+  for (const roleId of (cfg.staffRoleIds || [])) {
+    overwrites.push({
+      id: roleId,
+      allow: [
+        PF.ViewChannel,
+        PF.Connect,
+        PF.Speak,
+        PF.Stream,
+        PF.MoveMembers,
+        PF.MuteMembers,
+        PF.DeafenMembers,
+        PF.ManageChannels,
+        PF.UseEmbeddedActivities,
+        PF.UseSoundboard,
+        PF.UseVAD,
+      ],
+    });
+  }
+
+  // Bot role — needs move/manage to do its job
+  if (cfg.botRoleId) {
+    overwrites.push({
+      id: cfg.botRoleId,
+      allow: [
+        PF.ViewChannel,
+        PF.Connect,
+        PF.MoveMembers,
+        PF.ManageChannels,
+        PF.ManageRoles,
+      ],
+    });
+  }
+
+  return overwrites;
 }
 
 // Collect all human members currently in any of the lobby channels
@@ -1423,7 +1599,7 @@ async function moveEveryoneToLobby(guild, cfg) {
   }
 }
 
-// Core shuffle round: collect pool members, create temp channels, move people
+// Core speed-dating round: anti-repeat pairing, named rooms, perms, participant role, warning timer
 async function runShuffleRound(guild, guildId) {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   if (!cfg.enabled) return;
@@ -1431,36 +1607,65 @@ async function runShuffleRound(guild, guildId) {
 
   const state = shuffleState.get(guildId);
   if (!state) return;
+
+  // Cancel any pending warning from the previous round
+  if (state.warningTimeoutId) {
+    clearTimeout(state.warningTimeoutId);
+    state.warningTimeoutId = null;
+  }
+
   state.roundNumber = (state.roundNumber || 0) + 1;
   const round = state.roundNumber;
+  if (!state.pairHistory) state.pairHistory = new Set();
 
-  console.log(`[vc-shuffle] Guild ${guildId}: starting round #${round}`);
+  console.log(`[vc-shuffle] Guild ${guildId}: starting speed-dating round #${round}`);
 
-  // Step 1: move everyone currently in temp channels back to the primary lobby
+  // Step 1: move everyone in temp rooms back to the primary lobby, then delete rooms
   await moveEveryoneToLobby(guild, cfg);
   await cleanupShuffleChannels(guild, cfg);
 
-  // Step 2: collect all members who are now in any lobby channel
+  // Step 2: collect pool
   const pool = collectPoolMembers(guild, cfg);
   if (pool.length < 2) {
-    console.log(`[vc-shuffle] Guild ${guildId}: only ${pool.length} member(s) in pool — skipping round, waiting for next interval`);
+    console.log(`[vc-shuffle] Guild ${guildId}: only ${pool.length} member(s) in pool — skipping round`);
     return;
   }
 
-  // Step 3: split into groups
-  const groups = splitIntoGroups(pool, cfg.minGroupSize, cfg.maxGroupSize);
+  // Step 3: assign participant role to anyone in the lobby who doesn't have it yet
+  if (cfg.participantRoleId) {
+    for (const member of pool) {
+      try {
+        if (!member.roles.cache.has(cfg.participantRoleId)) {
+          await member.roles.add(cfg.participantRoleId, 'Speed Dating: joined lobby');
+        }
+      } catch (err) {
+        console.error(`[vc-shuffle] Could not assign participant role to ${member.id}:`, err.message);
+      }
+    }
+  }
 
-  // Step 4: for each group, create a temp voice channel and move them in
+  // Step 4: pair members (anti-repeat, 1-on-1 by default, or configured group size)
+  const targetSize = cfg.minGroupSize; // speed dating uses a fixed size (min == max for 1v1, 2v2, 3v3)
+  const groups = speedDatePair(pool, targetSize, state.pairHistory);
+
+  // Record pairs used this round into session history
+  for (const group of groups) recordPairs(group, state.pairHistory);
+
+  // Step 5: build room permissions
+  const permOverwrites = buildRoomPermissions(guild, cfg);
+
+  // Step 6: create temp channels and move people in
   const newChannelIds = [];
   for (let i = 0; i < groups.length; i++) {
-    const roomName = `Shuffle Room ${i + 1}`;
+    const roomName = `High Speed Connection ${i + 1}`;
     let ch;
     try {
       ch = await guild.channels.create({
         name: roomName,
         type: ChannelType.GuildVoice,
         parent: cfg.categoryId || null,
-        reason: `VC Shuffle round #${round}`,
+        permissionOverwrites: permOverwrites,
+        reason: `Speed Dating round #${round}`,
       });
       newChannelIds.push(ch.id);
     } catch (err) {
@@ -1470,7 +1675,7 @@ async function runShuffleRound(guild, guildId) {
 
     for (const member of groups[i]) {
       try {
-        await member.voice.setChannel(ch, `VC Shuffle round #${round}`);
+        await member.voice.setChannel(ch, `Speed Dating round #${round}`);
       } catch (err) {
         console.error(`[vc-shuffle] Could not move member ${member.id} to ${roomName}:`, err.message);
       }
@@ -1480,16 +1685,17 @@ async function runShuffleRound(guild, guildId) {
   cfg.createdChannelIds = newChannelIds;
   saveVcShuffleConfig(vcShuffleConfig);
 
-  // Step 5: optional announcement
+  // Step 7: announce round start
   if (cfg.announcementChannelId) {
     try {
       const textCh = guild.channels.cache.get(cfg.announcementChannelId);
       if (textCh) {
-        const groupLines = groups.map((g, i) => `**Room ${i + 1}:** ${g.map((m) => m.displayName).join(', ')}`).join('\n');
+        const groupLines = groups.map((g, i) => `**High Speed Connection ${i + 1}:** ${g.map((m) => m.displayName).join(' ↔ ')}`).join('\n');
         const embed = new EmbedBuilder()
           .setColor(0x8a2be2)
-          .setTitle(`🔀 VC Shuffle — Round #${round}`)
-          .setDescription(`${pool.length} member(s) shuffled into ${groups.length} group(s)!\n\n${groupLines}`)
+          .setTitle(`💘 Speed Dating — Round #${round}`)
+          .setDescription(`${pool.length} member(s) paired across ${groups.length} connection(s)!\n\n${groupLines}`)
+          .setFooter({ text: `Round ends in ~${cfg.minIntervalMinutes} minute(s)` })
           .setTimestamp();
         await textCh.send({ embeds: [embed] });
       }
@@ -1498,7 +1704,41 @@ async function runShuffleRound(guild, guildId) {
     }
   }
 
+  // Step 8: schedule the wrap-up warning (warningSeconds before the bell)
+  const roundMs = (cfg.minIntervalMinutes ?? 3) * 60 * 1000;
+  const warnMs = Math.max(0, roundMs - (cfg.warningSeconds ?? 30) * 1000);
+
+  if (warnMs > 0 && cfg.announcementChannelId) {
+    const warningTimeoutId = setTimeout(async () => {
+      try {
+        const textCh = guild.channels.cache.get(cfg.announcementChannelId);
+        const secsLeft = cfg.warningSeconds ?? 30;
+        if (textCh) {
+          await textCh.send(`⏰ **${secsLeft} seconds left!** Start wrapping up your conversations — the bell rings soon.`);
+        }
+      } catch (err) {
+        console.error(`[vc-shuffle] Could not post warning in guild ${guildId}:`, err.message);
+      }
+    }, warnMs);
+    shuffleState.set(guildId, { ...shuffleState.get(guildId), warningTimeoutId });
+  }
+
   console.log(`[vc-shuffle] Guild ${guildId}: round #${round} complete — ${pool.length} members in ${groups.length} rooms`);
+}
+
+// Post the bell message to the announcement channel (called just before a new round starts)
+async function postBellMessage(guild, guildId) {
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  if (!cfg.announcementChannelId) return;
+  try {
+    const textCh = guild.channels.cache.get(cfg.announcementChannelId);
+    if (!textCh) return;
+    const state = shuffleState.get(guildId);
+    const bellMsg = BELL_MESSAGES[(state?.roundNumber ?? 0) % BELL_MESSAGES.length];
+    await textCh.send(bellMsg);
+  } catch (err) {
+    console.error(`[vc-shuffle] Could not post bell message in guild ${guildId}:`, err.message);
+  }
 }
 
 // Pick a random next interval in ms between min and max configured minutes
@@ -1513,14 +1753,18 @@ function scheduleNextShuffle(guild, guildId) {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   if (!cfg.enabled) return;
 
+  // Speed dating uses a fixed round length — min and max are the same (set-interval still works)
   const delay = randomIntervalMs(cfg);
   const nextAt = Date.now() + delay;
 
   const state = shuffleState.get(guildId) || {};
   if (state.timeoutId) clearTimeout(state.timeoutId);
+  if (state.warningTimeoutId) clearTimeout(state.warningTimeoutId);
 
   const timeoutId = setTimeout(async () => {
     try {
+      // Ring the bell before we move anyone
+      await postBellMessage(guild, guildId);
       await runShuffleRound(guild, guildId);
     } catch (err) {
       console.error(`[vc-shuffle] Uncaught error in shuffle round for guild ${guildId}:`, err.message);
@@ -1534,8 +1778,8 @@ function scheduleNextShuffle(guild, guildId) {
     }
   }, delay);
 
-  shuffleState.set(guildId, { ...state, timeoutId, nextShuffleAt: nextAt });
-  console.log(`[vc-shuffle] Guild ${guildId}: next shuffle in ${Math.round(delay / 1000)}s (at ${new Date(nextAt).toISOString()})`);
+  shuffleState.set(guildId, { ...state, timeoutId, warningTimeoutId: null, nextShuffleAt: nextAt });
+  console.log(`[vc-shuffle] Guild ${guildId}: next round in ${Math.round(delay / 1000)}s (at ${new Date(nextAt).toISOString()})`);
 }
 
 // Start shuffle for a guild
@@ -1544,10 +1788,11 @@ async function startVcShuffle(guild, guildId, runImmediately = false) {
   cfg.enabled = true;
   saveVcShuffleConfig(vcShuffleConfig);
 
-  // Clear any existing timer
+  // Clear any existing timer and reset session state including pair history
   const existing = shuffleState.get(guildId);
   if (existing?.timeoutId) clearTimeout(existing.timeoutId);
-  shuffleState.set(guildId, { roundNumber: 0 });
+  if (existing?.warningTimeoutId) clearTimeout(existing.warningTimeoutId);
+  shuffleState.set(guildId, { roundNumber: 0, pairHistory: new Set() });
 
   if (runImmediately) {
     await runShuffleRound(guild, guildId);
@@ -1555,7 +1800,7 @@ async function startVcShuffle(guild, guildId, runImmediately = false) {
   scheduleNextShuffle(guild, guildId);
 }
 
-// Stop shuffle for a guild
+// Stop shuffle for a guild — ring the final bell, post session summary, clean up
 async function stopVcShuffle(guild, guildId) {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   cfg.enabled = false;
@@ -1563,11 +1808,54 @@ async function stopVcShuffle(guild, guildId) {
 
   const state = shuffleState.get(guildId);
   if (state?.timeoutId) clearTimeout(state.timeoutId);
-  shuffleState.delete(guildId);
+  if (state?.warningTimeoutId) clearTimeout(state.warningTimeoutId);
 
   // Move everyone back to lobby then cleanup
   await moveEveryoneToLobby(guild, cfg);
   await cleanupShuffleChannels(guild, cfg);
+
+  // Strip the participant role from everyone in the lobby channels
+  if (cfg.participantRoleId) {
+    for (const channelId of cfg.lobbyChannelIds) {
+      const ch = guild.channels.cache.get(channelId);
+      if (!ch) continue;
+      for (const member of ch.members.values()) {
+        try {
+          if (member.roles.cache.has(cfg.participantRoleId)) {
+            await member.roles.remove(cfg.participantRoleId, 'Speed Dating: session ended');
+          }
+        } catch (err) {
+          console.error(`[vc-shuffle] Could not remove participant role from ${member.id}:`, err.message);
+        }
+      }
+    }
+  }
+
+  // Post session summary to the announcement channel
+  if (cfg.announcementChannelId && state?.pairHistory) {
+    try {
+      const textCh = guild.channels.cache.get(cfg.announcementChannelId);
+      if (textCh) {
+        const rounds = state.roundNumber ?? 0;
+        const pairs = state.pairHistory.size;
+        const embed = new EmbedBuilder()
+          .setColor(0x8a2be2)
+          .setTitle('💘 Speed Dating — Session Over')
+          .setDescription(
+            `That's a wrap!\n\n` +
+            `**Rounds completed:** ${rounds}\n` +
+            `**Unique connections made:** ${pairs}\n\n` +
+            `Everyone has been returned to the lobby. Hope you made some good connections.`
+          )
+          .setTimestamp();
+        await textCh.send({ embeds: [embed] });
+      }
+    } catch (err) {
+      console.error(`[vc-shuffle] Could not post session summary in guild ${guildId}:`, err.message);
+    }
+  }
+
+  shuffleState.delete(guildId);
 }
 
 // Re-arm shuffles on bot restart for any guild that had it enabled
@@ -1806,10 +2094,41 @@ const commands = [
     .addSubcommand((sub) =>
       sub
         .setName('set-announce')
-        .setDescription('Set a text channel to post shuffle round announcements in')
+        .setDescription('Set a text channel to post speed dating round announcements in')
         .addChannelOption((opt) => opt.setName('channel').setDescription('Text channel for announcements').setRequired(true))
     )
-    .addSubcommand((sub) => sub.setName('shuffle-now').setDescription('Run a shuffle round immediately (without waiting for the next interval)')),
+    .addSubcommand((sub) => sub.setName('shuffle-now').setDescription('Ring the bell and start a new round immediately'))
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-participant-role')
+        .setDescription('Role assigned to members when they enter the lobby; applied to all temp rooms')
+        .addRoleOption((opt) => opt.setName('role').setDescription('The participant role').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('add-staff-role')
+        .setDescription('Add a staff role that always gets access to temp speed-dating rooms')
+        .addRoleOption((opt) => opt.setName('role').setDescription('Staff role').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('remove-staff-role')
+        .setDescription('Remove a staff role from the temp room access list')
+        .addRoleOption((opt) => opt.setName('role').setDescription('Staff role').setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-bot-role')
+        .setDescription("Set the bot's managed role so it keeps manage perms in temp rooms")
+        .addRoleOption((opt) => opt.setName('role').setDescription("The bot's role").setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-warning-seconds')
+        .setDescription('Seconds before the bell to post a wrap-up warning (default: 30)')
+        .addIntegerOption((opt) => opt.setName('seconds').setDescription('Seconds before bell').setRequired(true).setMinValue(5).setMaxValue(300))
+    )
+    .addSubcommand((sub) => sub.setName('end-session').setDescription('End the session, post the summary, and clean up all rooms')),
 ].map((cmd) => cmd.toJSON());
 
 // ---- Register slash commands with Discord (GLOBAL = works in every server
@@ -2451,26 +2770,89 @@ client.on('interactionCreate', async (interaction) => {
 
     else if (sub === 'shuffle-now') {
       await interaction.deferReply();
+      // Cancel any pending warning timer — manual move resets the clock
+      const state = shuffleState.get(guildId);
+      if (state?.warningTimeoutId) {
+        clearTimeout(state.warningTimeoutId);
+        if (state) state.warningTimeoutId = null;
+      }
+      await postBellMessage(guild, guildId);
       await runShuffleRound(guild, guildId);
-      await interaction.editReply(`🔀 **Shuffle triggered manually!** Check the announcement channel (if set) for the room assignments.`);
+      // Reset the next scheduled round timer too
+      scheduleNextShuffle(guild, guildId);
+      await interaction.editReply(`🔔 **Bell rung manually!** Everyone's been moved to fresh connections. Timer reset.`);
+    }
+
+    else if (sub === 'end-session') {
+      await interaction.deferReply();
+      await stopVcShuffle(guild, guildId);
+      await interaction.editReply(`⏹️ **Speed Dating session ended.** Summary posted in the announcement channel (if set).`);
+    }
+
+    else if (sub === 'set-participant-role') {
+      const role = interaction.options.getRole('role');
+      cfg.participantRoleId = role.id;
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ **${role.name}** set as the participant role. Members get it on lobby join; all temp rooms will be locked to it.`);
+    }
+
+    else if (sub === 'add-staff-role') {
+      const role = interaction.options.getRole('role');
+      if (!cfg.staffRoleIds) cfg.staffRoleIds = [];
+      if (cfg.staffRoleIds.includes(role.id)) {
+        return interaction.reply({ content: `**${role.name}** is already a staff role.`, flags: MessageFlags.Ephemeral });
+      }
+      cfg.staffRoleIds.push(role.id);
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ **${role.name}** added to staff roles — will get access to all temp rooms.`);
+    }
+
+    else if (sub === 'remove-staff-role') {
+      const role = interaction.options.getRole('role');
+      if (!cfg.staffRoleIds?.includes(role.id)) {
+        return interaction.reply({ content: `**${role.name}** isn't in the staff role list.`, flags: MessageFlags.Ephemeral });
+      }
+      cfg.staffRoleIds = cfg.staffRoleIds.filter((id) => id !== role.id);
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ **${role.name}** removed from staff roles.`);
+    }
+
+    else if (sub === 'set-bot-role') {
+      const role = interaction.options.getRole('role');
+      cfg.botRoleId = role.id;
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ Bot role set to **${role.name}** — it'll have manage perms in all temp rooms.`);
+    }
+
+    else if (sub === 'set-warning-seconds') {
+      const seconds = interaction.options.getInteger('seconds');
+      cfg.warningSeconds = seconds;
+      saveVcShuffleConfig(vcShuffleConfig);
+      await interaction.reply(`✅ Wrap-up warning will fire **${seconds} seconds** before the bell.`);
     }
 
     else if (sub === 'status') {
       const state = shuffleState.get(guildId);
       const nextIn = state?.nextShuffleAt ? `<t:${Math.floor(state.nextShuffleAt / 1000)}:R>` : 'N/A';
+      const groupModeLabel = cfg.minGroupSize === 1 ? '1-on-1 (speed dating)' : `${cfg.minGroupSize}v${cfg.minGroupSize}`;
       const embed = new EmbedBuilder()
         .setColor(cfg.enabled ? 0x8a2be2 : 0x999999)
-        .setTitle('🔀 VC Shuffle Status')
+        .setTitle('💘 Speed Dating — Status')
         .addFields(
           { name: 'Running', value: cfg.enabled ? '🟢 Yes' : '🔴 No', inline: true },
           { name: 'Round #', value: String(state?.roundNumber ?? 0), inline: true },
-          { name: 'Next shuffle', value: cfg.enabled ? nextIn : 'Not scheduled', inline: true },
-          { name: 'Group size', value: `${cfg.minGroupSize}–${cfg.maxGroupSize} people`, inline: true },
-          { name: 'Interval', value: `${cfg.minIntervalMinutes}–${cfg.maxIntervalMinutes} minutes`, inline: true },
-          { name: 'Temp rooms created', value: String(cfg.createdChannelIds.length), inline: true },
-          { name: 'Lobby/pool channels', value: cfg.lobbyChannelIds.length ? cfg.lobbyChannelIds.map((id) => `<#${id}>`).join(', ') : 'None set', inline: false },
+          { name: 'Next bell', value: cfg.enabled ? nextIn : 'Not scheduled', inline: true },
+          { name: 'Mode', value: groupModeLabel, inline: true },
+          { name: 'Round length', value: `${cfg.minIntervalMinutes} min`, inline: true },
+          { name: 'Warn before bell', value: `${cfg.warningSeconds ?? 30}s`, inline: true },
+          { name: 'Unique pairs this session', value: String(state?.pairHistory?.size ?? 0), inline: true },
+          { name: 'Active temp rooms', value: String(cfg.createdChannelIds.length), inline: true },
+          { name: 'Lobby channels', value: cfg.lobbyChannelIds.length ? cfg.lobbyChannelIds.map((id) => `<#${id}>`).join(', ') : 'None set', inline: false },
+          { name: 'Participant role', value: cfg.participantRoleId ? `<@&${cfg.participantRoleId}>` : 'Not set', inline: true },
+          { name: 'Staff roles', value: cfg.staffRoleIds?.length ? cfg.staffRoleIds.map((id) => `<@&${id}>`).join(', ') : 'None', inline: true },
+          { name: 'Bot role', value: cfg.botRoleId ? `<@&${cfg.botRoleId}>` : 'Not set', inline: true },
           { name: 'Announcement channel', value: cfg.announcementChannelId ? `<#${cfg.announcementChannelId}>` : 'Not set', inline: true },
-          { name: 'Temp room category', value: cfg.categoryId ? `<#${cfg.categoryId}>` : 'Top-level (no category)', inline: true },
+          { name: 'Room category', value: cfg.categoryId ? `<#${cfg.categoryId}>` : 'Top-level', inline: true },
         );
       await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
@@ -3517,7 +3899,7 @@ app.post('/channel-index/save-descriptions', (req, res) => {
   res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('Descriptions saved.')}`);
 });
 
-// ---- VC Shuffle Dashboard ----
+// ---- Speed Dating Dashboard ----
 app.get('/vc-shuffle', (req, res) => {
   const guildId = resolveGuildId(req);
   const guild = client.guilds.cache.get(guildId);
@@ -3528,6 +3910,8 @@ app.get('/vc-shuffle', (req, res) => {
   const voiceChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice).values()].sort((a, b) => a.rawPosition - b.rawPosition);
   const textChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement).values()].sort((a, b) => a.rawPosition - b.rawPosition);
   const categories = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildCategory).values()].sort((a, b) => a.rawPosition - b.rawPosition);
+  const roles = [...guild.roles.cache.filter((r) => !r.managed && r.id !== guild.id).values()].sort((a, b) => b.rawPosition - a.rawPosition);
+  const allRoles = [...guild.roles.cache.values()].sort((a, b) => b.rawPosition - a.rawPosition);
 
   const nextIn = state?.nextShuffleAt ? new Date(state.nextShuffleAt).toLocaleString() : 'N/A';
   const poolSize = collectPoolMembers(guild, cfg).length;
@@ -3542,69 +3926,117 @@ app.get('/vc-shuffle', (req, res) => {
   const announceOptions = `<option value="">-- none --</option>` +
     textChannels.map((c) => `<option value="${c.id}" ${cfg.announcementChannelId === c.id ? 'selected' : ''}>#${escapeHtml(c.name)}</option>`).join('');
 
+  const participantRoleOptions = `<option value="">-- none --</option>` +
+    roles.map((r) => `<option value="${r.id}" ${cfg.participantRoleId === r.id ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
+
+  const botRoleOptions = `<option value="">-- none --</option>` +
+    allRoles.map((r) => `<option value="${r.id}" ${cfg.botRoleId === r.id ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
+
+  const staffRoleChecklist = roles.map((r) =>
+    `<label class="check-item"><input type="checkbox" name="staffRoleIds" value="${r.id}" ${(cfg.staffRoleIds || []).includes(r.id) ? 'checked' : ''}> ${escapeHtml(r.name)}</label>`
+  ).join('') || '<p class="muted">No roles found.</p>';
+
+  const groupModeLabel = cfg.minGroupSize === 1 ? '1-on-1' : `${cfg.minGroupSize}v${cfg.minGroupSize}`;
+
   const body = `
     <div class="card">
-      <h2>🔀 VC Shuffle — ${escapeHtml(guild.name)}</h2>
+      <h2>💘 Speed Dating — ${escapeHtml(guild.name)}</h2>
       <p><span class="pill ${cfg.enabled ? 'on' : 'off'}">${cfg.enabled ? 'RUNNING' : 'STOPPED'}</span></p>
       <div class="stat-grid">
         <div class="stat"><div class="num">${state?.roundNumber ?? 0}</div><div class="label">Rounds completed</div></div>
-        <div class="stat"><div class="num">${poolSize}</div><div class="label">Members in pool now</div></div>
-        <div class="stat"><div class="num">${cfg.createdChannelIds.length}</div><div class="label">Active temp rooms</div></div>
-        <div class="stat"><div class="num">${cfg.minIntervalMinutes}–${cfg.maxIntervalMinutes}m</div><div class="label">Interval</div></div>
-        <div class="stat"><div class="num">${cfg.minGroupSize}–${cfg.maxGroupSize}</div><div class="label">Group size</div></div>
+        <div class="stat"><div class="num">${state?.pairHistory?.size ?? 0}</div><div class="label">Unique connections</div></div>
+        <div class="stat"><div class="num">${poolSize}</div><div class="label">Members in lobby</div></div>
+        <div class="stat"><div class="num">${cfg.createdChannelIds.length}</div><div class="label">Active rooms</div></div>
+        <div class="stat"><div class="num">${cfg.minIntervalMinutes}m</div><div class="label">Round length</div></div>
+        <div class="stat"><div class="num">${groupModeLabel}</div><div class="label">Mode</div></div>
       </div>
-      ${cfg.enabled ? `<p class="muted">Next shuffle at: ${nextIn}</p>` : ''}
+      ${cfg.enabled ? `<p class="muted">Next bell at: ${nextIn}</p>` : ''}
       <div class="btn-row">
         <form method="POST" action="/vc-shuffle/start"><input type="hidden" name="guild" value="${guildId}"><button type="submit" ${cfg.enabled ? 'disabled style="opacity:0.5;"' : ''}>▶️ Start</button></form>
-        <form method="POST" action="/vc-shuffle/stop"><input type="hidden" name="guild" value="${guildId}"><button class="danger" type="submit" ${!cfg.enabled ? 'disabled style="opacity:0.5;"' : ''}>⏹️ Stop</button></form>
-        <form method="POST" action="/vc-shuffle/shuffle-now"><input type="hidden" name="guild" value="${guildId}"><button class="secondary" type="submit">🔀 Shuffle Now</button></form>
+        <form method="POST" action="/vc-shuffle/stop"><input type="hidden" name="guild" value="${guildId}"><button class="danger" type="submit" ${!cfg.enabled ? 'disabled style="opacity:0.5;"' : ''}>⏹️ End Session</button></form>
+        <form method="POST" action="/vc-shuffle/shuffle-now"><input type="hidden" name="guild" value="${guildId}"><button class="secondary" type="submit">🔔 Ring Bell Now</button></form>
       </div>
     </div>
 
     <div class="card">
       <form method="POST" action="/vc-shuffle/save-settings">
         <input type="hidden" name="guild" value="${guildId}">
-        <h3>Timing &amp; Group Size</h3>
+        <h3>Round Timing</h3>
+        <p class="muted">Set both min and max to the same value for a fixed round length (recommended for speed dating).</p>
         <div class="row">
-          <div class="field"><label>Min interval (minutes)</label><input type="number" name="minIntervalMinutes" min="1" max="60" value="${cfg.minIntervalMinutes ?? 5}"></div>
-          <div class="field"><label>Max interval (minutes)</label><input type="number" name="maxIntervalMinutes" min="1" max="60" value="${cfg.maxIntervalMinutes ?? 10}"></div>
-          <div class="field"><label>Min group size</label><input type="number" name="minGroupSize" min="2" max="10" value="${cfg.minGroupSize ?? 2}"></div>
-          <div class="field"><label>Max group size</label><input type="number" name="maxGroupSize" min="2" max="20" value="${cfg.maxGroupSize ?? 5}"></div>
+          <div class="field"><label>Round length — min (minutes)</label><input type="number" name="minIntervalMinutes" min="1" max="60" value="${cfg.minIntervalMinutes ?? 3}"></div>
+          <div class="field"><label>Round length — max (minutes)</label><input type="number" name="maxIntervalMinutes" min="1" max="60" value="${cfg.maxIntervalMinutes ?? 3}"></div>
+          <div class="field"><label>Warning before bell (seconds)</label><input type="number" name="warningSeconds" min="5" max="300" value="${cfg.warningSeconds ?? 30}"></div>
         </div>
-        <h3>Temp Room Category</h3>
-        <div class="field"><label>Category for shuffle rooms</label><select name="categoryId">${categoryOptions}</select></div>
+        <h3>Pairing Mode</h3>
+        <p class="muted">1 = 1-on-1 (classic speed dating). 2 = 2v2. 3 = 3v3. Set both min and max to the same number.</p>
+        <div class="row">
+          <div class="field"><label>Group size (min)</label><input type="number" name="minGroupSize" min="1" max="10" value="${cfg.minGroupSize ?? 1}"></div>
+          <div class="field"><label>Group size (max)</label><input type="number" name="maxGroupSize" min="1" max="10" value="${cfg.maxGroupSize ?? 1}"></div>
+        </div>
+        <h3>Room Category</h3>
+        <div class="field"><label>Create "High Speed Connection" rooms under</label><select name="categoryId">${categoryOptions}</select></div>
         <h3>Announcement Channel</h3>
-        <div class="field"><label>Post round results here</label><select name="announcementChannelId">${announceOptions}</select></div>
+        <div class="field"><label>Post round results &amp; bell messages here</label><select name="announcementChannelId">${announceOptions}</select></div>
         <div class="btn-row"><button type="submit">💾 Save Settings</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <form method="POST" action="/vc-shuffle/save-roles">
+        <input type="hidden" name="guild" value="${guildId}">
+        <h3>Participant Role</h3>
+        <p class="muted">Assigned to every member when they join a lobby. All temp "High Speed Connection" rooms are locked to this role (+ staff + bot). Members who leave mid-session keep the role until the session ends.</p>
+        <div class="field"><label>Participant role</label><select name="participantRoleId">${participantRoleOptions}</select></div>
+        <h3>Bot Role</h3>
+        <p class="muted">The bot's own managed role — needs View, Connect, and Manage Channel/Roles perms in temp rooms to move people.</p>
+        <div class="field"><label>Bot role</label><select name="botRoleId">${botRoleOptions}</select></div>
+        <h3>Staff Roles</h3>
+        <p class="muted">These roles always get full access (View, Connect, Speak, Move Members) in every temp room.</p>
+        <div class="checklist">${staffRoleChecklist}</div>
+        <div class="btn-row"><button type="submit">💾 Save Roles</button></div>
       </form>
     </div>
 
     <div class="card">
       <form method="POST" action="/vc-shuffle/save-lobbies">
         <input type="hidden" name="guild" value="${guildId}">
-        <h3>Lobby / Pool Channels</h3>
-        <p class="muted">Members in these channels are pooled together and shuffled into temp rooms. Add the channel(s) people gather in before a shuffle session starts.</p>
+        <h3>Lobby Channels</h3>
+        <p class="muted">Members waiting here are pooled and paired when the round starts. Joining mid-session earns them the participant role immediately.</p>
         <div class="checklist">${lobbyChecklist}</div>
         <div class="btn-row"><button type="submit">💾 Save Lobbies</button></div>
       </form>
     </div>
   `;
 
-  res.send(renderLayout({ title: 'VC Shuffle', guildId, currentPath: '/vc-shuffle', body, flash: req.query.flash }));
+  res.send(renderLayout({ title: 'Speed Dating', guildId, currentPath: '/vc-shuffle', body, flash: req.query.flash }));
 });
 
 app.post('/vc-shuffle/save-settings', (req, res) => {
-  const { guild: guildId, minIntervalMinutes, maxIntervalMinutes, minGroupSize, maxGroupSize, categoryId, announcementChannelId } = req.body;
+  const { guild: guildId, minIntervalMinutes, maxIntervalMinutes, minGroupSize, maxGroupSize, categoryId, announcementChannelId, warningSeconds } = req.body;
   if (!guildId) return res.redirect('/');
   const cfg = ensureVcShuffleGuildConfig(guildId);
-  cfg.minIntervalMinutes = Math.max(1, parseInt(minIntervalMinutes, 10) || 5);
-  cfg.maxIntervalMinutes = Math.max(cfg.minIntervalMinutes, parseInt(maxIntervalMinutes, 10) || 10);
-  cfg.minGroupSize = Math.max(2, parseInt(minGroupSize, 10) || 2);
-  cfg.maxGroupSize = Math.max(cfg.minGroupSize, parseInt(maxGroupSize, 10) || 5);
+  cfg.minIntervalMinutes = Math.max(1, parseInt(minIntervalMinutes, 10) || 3);
+  cfg.maxIntervalMinutes = Math.max(cfg.minIntervalMinutes, parseInt(maxIntervalMinutes, 10) || 3);
+  // Speed dating supports group size of 1 (1-on-1)
+  cfg.minGroupSize = Math.max(1, parseInt(minGroupSize, 10) || 1);
+  cfg.maxGroupSize = Math.max(cfg.minGroupSize, parseInt(maxGroupSize, 10) || 1);
   cfg.categoryId = categoryId || null;
   cfg.announcementChannelId = announcementChannelId || null;
+  cfg.warningSeconds = Math.min(300, Math.max(5, parseInt(warningSeconds, 10) || 30));
   saveVcShuffleConfig(vcShuffleConfig);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Shuffle settings saved!')}`);
+  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Speed dating settings saved!')}`);
+});
+
+app.post('/vc-shuffle/save-roles', (req, res) => {
+  const { guild: guildId, participantRoleId, botRoleId, staffRoleIds } = req.body;
+  if (!guildId) return res.redirect('/');
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  cfg.participantRoleId = participantRoleId || null;
+  cfg.botRoleId = botRoleId || null;
+  cfg.staffRoleIds = asArray(staffRoleIds);
+  saveVcShuffleConfig(vcShuffleConfig);
+  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Role settings saved!')}`);
 });
 
 app.post('/vc-shuffle/save-lobbies', (req, res) => {
@@ -3640,8 +4072,16 @@ app.post('/vc-shuffle/shuffle-now', async (req, res) => {
   const { guild: guildId } = req.body;
   if (!guildId) return res.redirect('/');
   const guild = client.guilds.cache.get(guildId);
+  // Cancel pending warning before manually ringing the bell
+  const state = shuffleState.get(guildId);
+  if (state?.warningTimeoutId) {
+    clearTimeout(state.warningTimeoutId);
+    if (state) state.warningTimeoutId = null;
+  }
+  await postBellMessage(guild, guildId);
   await runShuffleRound(guild, guildId);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Manual shuffle complete!')}`);
+  scheduleNextShuffle(guild, guildId); // reset the next round timer
+  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Bell rung! Round started and timer reset.')}`);
 });
 
 app.listen(PORT, () => {
