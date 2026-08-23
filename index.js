@@ -1564,12 +1564,28 @@ function recordPairs(group, pairHistory) {
   }
 }
 
-// Build the permission overwrites array for a temp high-speed-connection room.
-// participantRoleId gets standard VC perms. staffRoleIds get the same.
-// botRoleId gets full manage perms. @everyone is denied unless there's no participant role.
+// Build the base permission overwrites array for a temp high-speed-connection room.
+// Returns role-level overwrites only. Member-specific overwrites (for each dater)
+// are added later via ch.permissionOverwrites.edit() right before moving them in —
+// this guarantees they can always Connect even if they lack the participant role.
 function buildRoomPermissions(guild, cfg) {
   const { PermissionFlagsBits: PF } = require('discord.js');
   const overwrites = [];
+
+  // Always give the bot's own user explicit full access so it can move people in
+  // regardless of any role-based deny. This is the most reliable approach — using
+  // the client.user.id user-level overwrite bypasses all role denies.
+  overwrites.push({
+    id: client.user.id,
+    allow: [
+      PF.ViewChannel,
+      PF.Connect,
+      PF.MoveMembers,
+      PF.ManageChannels,
+      PF.ManageRoles,
+      PF.Speak,
+    ],
+  });
 
   // Participant role — the main access gate
   if (cfg.participantRoleId) {
@@ -1586,14 +1602,14 @@ function buildRoomPermissions(guild, cfg) {
         PF.RequestToSpeak,
       ],
     });
-    // Deny @everyone — only participants can enter
+    // Deny @everyone — only participants + explicitly added members can enter
     overwrites.push({
       id: guild.id,
       deny: [PF.ViewChannel, PF.Connect],
     });
   }
 
-  // Staff roles — same access as participants
+  // Staff roles — full moderation access to all date rooms
   for (const roleId of (cfg.staffRoleIds || [])) {
     overwrites.push({
       id: roleId,
@@ -1613,7 +1629,7 @@ function buildRoomPermissions(guild, cfg) {
     });
   }
 
-  // Bot role — needs move/manage to do its job
+  // Bot managed role (belt-and-suspenders on top of the user-level override above)
   if (cfg.botRoleId) {
     overwrites.push({
       id: cfg.botRoleId,
@@ -1709,7 +1725,15 @@ async function runShuffleRound(guild, guildId) {
   // Step 2: collect pool
   const pool = collectPoolMembers(guild, cfg);
   if (pool.length < 2) {
-    console.log(`[vc-shuffle] Guild ${guildId}: only ${pool.length} member(s) in pool — skipping round`);
+    console.log(`[vc-shuffle] Guild ${guildId}: only ${pool.length} member(s) in pool — skipping round, will retry next interval`);
+    if (cfg.announcementChannelId) {
+      try {
+        const textCh = guild.channels.cache.get(cfg.announcementChannelId);
+        if (textCh) await textCh.send(`⚠️ Not enough people in the lobby for Round #${round} (need at least 2) — waiting for more to join!`);
+      } catch { /* best effort */ }
+    }
+    // Still reschedule — don't leave the session stuck because of a temporarily empty lobby
+    scheduleNextShuffle(guild, guildId);
     return;
   }
 
@@ -1753,6 +1777,23 @@ async function runShuffleRound(guild, guildId) {
     } catch (err) {
       console.error(`[vc-shuffle] Could not create channel "${roomName}" in guild ${guildId}:`, err.message);
       continue;
+    }
+
+    // Grant each assigned member a user-level Connect allow on this specific channel.
+    // This ensures they can be moved in even if they don't have the participant role
+    // or if @everyone is denied on the channel. We do this before the move so Discord
+    // accepts the voice.setChannel() call without a Missing Permissions error.
+    for (const member of groups[i]) {
+      try {
+        await ch.permissionOverwrites.edit(member, {
+          ViewChannel: true,
+          Connect: true,
+          Speak: true,
+        }, { reason: `VC Speed Dating: assigning ${member.displayName} to round #${round}` });
+      } catch (err) {
+        console.error(`[vc-shuffle] Could not set connect perm for ${member.id} on ${roomName}:`, err.message);
+        // Don't abort — try the move anyway; they may have Connect via another role
+      }
     }
 
     for (const member of groups[i]) {
