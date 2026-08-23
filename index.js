@@ -4345,7 +4345,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     let matchupsCh = cfg.matchupsChannelId ? guild.channels.cache.get(cfg.matchupsChannelId) : null;
     if (!matchupsCh) {
       matchupsCh = await guild.channels.create({
-        name: 'high-speed-connection-matchups',
+        name: '💨・ʜɪɢʜ-sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ᴍᴀᴛᴄʜ-ᴜᴘs',
         type: ChannelType.GuildText,
         parent: category.id,
         permissionOverwrites: [
@@ -4377,7 +4377,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     let panelCh = cfg.staffPanelChannelId ? guild.channels.cache.get(cfg.staffPanelChannelId) : null;
     if (!panelCh) {
       panelCh = await guild.channels.create({
-        name: 'high-speed-connection-control',
+        name: '💨・ʜɪɢʜ-sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ᴄᴏɴᴛʀᴏʟ',
         type: ChannelType.GuildText,
         parent: category.id,
         permissionOverwrites: baseOverwrites,
