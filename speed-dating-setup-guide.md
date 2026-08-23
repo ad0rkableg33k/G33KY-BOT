@@ -44,9 +44,9 @@ This creates the full channel structure automatically:
 
 |Channel|Who sees it|Purpose|
 |-|-|-|
-|`#💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ɪɴꜰᴏ`|Everyone with Participant role|Read-only how-it-works post|
-|`#💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ᴍᴀᴛᴄʜ-ᴜᴘs `|Everyone with Participant role|Round pairings + session summary after|
-|`#💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ᴄᴏɴᴛʀᴏʟ `|Staff only|Live control panel with buttons|
+|`#ɪɴꜰᴏ`|Everyone with Participant role|Read-only how-it-works post|
+|`#ᴍᴀᴛᴄʜ-ᴜᴘs`|Everyone with Participant role|Round pairings + session summary after|
+|`#ᴄᴏɴᴛʀᴏʟ・ᴘᴀɴᴇʟ`|Staff only|Live control panel with buttons|
 |`💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ʟᴏʙʙʏ` (voice)|Participant role|Members wait here before each round|
 
 > ⚠️ Set up your roles \*\*before\*\* running setup — channel permissions are built from those values at creation time.
@@ -83,17 +83,17 @@ For the lobby to be visible to members who don't have the role yet, you'll need 
 
 On event day:
 
-1. Open `#💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ᴄᴏɴᴛʀᴏʟ`
+1. Open `#ᴄᴏɴᴛʀᴏʟ・ᴘᴀɴᴇʟ`
 2. Hit **▶️ Start** — the bot will run the first round immediately and schedule the rest
 3. Use **🔔 Ring Bell** to manually rotate early if needed (resets the timer)
-4. Use **⏹️ End Session** when done — posts the session summary to `#💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ᴍᴀᴛᴄʜ-ᴜᴘs` and cleans up all temp rooms
+4. Use **⏹️ End Session** when done — posts the session summary to `#ᴍᴀᴛᴄʜ-ᴜᴘs` and cleans up all temp rooms
 
 \---
 
 ## Event Rules (post these in #💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ɪɴꜰᴏ or your rules channel)
 
 ```
-#💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ʀᴜʟᴇs
+💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ʀᴜʟᴇs
 
 1. Be respectful. This is a social event — treat everyone with basic human decency. 
    Harassment, hate speech, or anything that would get you kicked under the server rules 

@@ -4240,9 +4240,9 @@ app.get('/vc-shuffle', (req, res) => {
       <h3>🏗️ Set Up Event Channels</h3>
       <p class="muted">Creates the full channel structure in one click — a <strong>💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ</strong> category containing:</p>
       <ul style="margin:8px 0 12px 18px; color: var(--text-muted); font-size:0.9rem; line-height:1.8;">
-        <li><strong>#💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ɪɴꜰᴏ</strong> — member-facing read-only info post (how it works)</li>
-        <li><strong>#💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ᴍᴀᴛᴄʜ-ᴜᴘs</strong> — round pairings + session summary (member-readable)</li>
-        <li><strong>#💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ᴄᴏɴᴛʀᴏʟ</strong> — staff-only panel with live ▶️ 🔔 ⏹️ buttons</li>
+        <li><strong>#ɪɴꜰᴏ</strong> — member-facing read-only info post (how it works)</li>
+        <li><strong>#ᴍᴀᴛᴄʜ-ᴜᴘs</strong> — round pairings + session summary (member-readable)</li>
+        <li><strong>#ᴄᴏɴᴛʀᴏʟ</strong> — staff-only panel with live ▶️ 🔔 ⏹️ buttons</li>
         <li><strong>💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ʟᴏʙʙʏ</strong> — voice lobby (only created if no lobby is configured yet)</li>
       </ul>
       <p class="muted" style="margin-bottom:12px;">
@@ -4357,7 +4357,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
       cfg.matchupsChannelId = matchupsCh.id;
     }
 
-    // 3. Create #💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ᴄᴏɴɴᴇᴄᴛɪᴏɴ・ɪɴꜰᴏ (member-facing read-only event info)
+    // 3. Create #ᴄᴏɴɴᴇᴄᴛɪᴏɴ・ɪɴꜰᴏ (member-facing read-only event info)
     let infoCh = cfg.infoChannelId ? guild.channels.cache.get(cfg.infoChannelId) : null;
     if (!infoCh) {
       infoCh = await guild.channels.create({
@@ -4373,7 +4373,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
       cfg.infoChannelId = infoCh.id;
     }
 
-    // 4. Create #💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜sᴛᴀꜰꜰ・ᴄᴏɴᴛʀᴏʟ・ᴘᴀɴᴇʟ
+    // 4. Create #sᴛᴀꜰꜰ・ᴄᴏɴᴛʀᴏʟ・ᴘᴀɴᴇʟ
     let panelCh = cfg.staffPanelChannelId ? guild.channels.cache.get(cfg.staffPanelChannelId) : null;
     if (!panelCh) {
       panelCh = await guild.channels.create({
@@ -4405,7 +4405,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
 
     saveVcShuffleConfig(vcShuffleConfig);
 
-    // 6. Post the member-facing info embed in #💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ɪɴꜰᴏ
+    // 6. Post the member-facing info embed in #ɪɴꜰᴏ
     try {
       const existingMessages = await infoCh.messages.fetch({ limit: 5 });
       const botMessages = existingMessages.filter((m) => m.author.id === guild.members.me?.id);
@@ -4422,7 +4422,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
             `**5. Camera dropped?**\nIf your camera turns off after being moved, just toggle it off and back on — it's a Discord thing, not you.\n\n` +
             `**6. Matchups**\nEach round's pairings are posted in <#${matchupsCh.id}> so you can look up who you met.`
           )
-          .setFooter({ text: 'Pairings are posted each round in #💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜ᴍᴀᴛᴄʜ-ᴜᴘs' })
+          .setFooter({ text: 'Pairings are posted each round in #ᴍᴀᴛᴄʜ-ᴜᴘs' })
           .setTimestamp();
         await infoCh.send({ embeds: [infoEmbed] });
       }
@@ -4435,7 +4435,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     saveVcShuffleConfig(vcShuffleConfig);
     await refreshStaffPanel(guild, guildId);
 
-    res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Event channels created! Check #💨・ʜɪɢʜ－sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ｜sᴛᴀꜰꜰ・ᴄᴏɴᴛʀᴏʟ・ᴘᴀɴᴇʟ')}`);
+    res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Event channels created! Check #sᴛᴀꜰꜰ・ᴄᴏɴᴛʀᴏʟ・ᴘᴀɴᴇʟ')}`);
   } catch (err) {
     console.error('[vc-shuffle] setup-channels error:', err);
     res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Setup failed — ' + err.message)}`);
