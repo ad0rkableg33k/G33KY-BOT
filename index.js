@@ -113,6 +113,7 @@ function ensureGuildConfig(guildId) {
     cameraConfig[guildId] = {
       enabled: true,
       monitoredChannels: [],
+      monitoredCategoryIds: [],  // NEW: all voice channels inside these categories are monitored
       exemptRoles: [],
       graceMinutes: DEFAULT_GRACE_MINUTES,
       warningMinutes: DEFAULT_WARNING_MINUTES,
@@ -123,6 +124,10 @@ function ensureGuildConfig(guildId) {
   // Normalize configs saved before announcementChannelId existed
   if (cameraConfig[guildId].announcementChannelId === undefined) {
     cameraConfig[guildId].announcementChannelId = null;
+  }
+  // Normalize configs saved before monitoredCategoryIds existed
+  if (cameraConfig[guildId].monitoredCategoryIds === undefined) {
+    cameraConfig[guildId].monitoredCategoryIds = [];
   }
   return cameraConfig[guildId];
 }
@@ -138,6 +143,26 @@ function setCameraPolicyEnabled(guildId, enabled) {
 
 function getMonitoredChannels(guildId) {
   return ensureGuildConfig(guildId).monitoredChannels;
+}
+
+// Resolves the full set of monitored channel IDs — explicit channels PLUS
+// any voice/stage channels that live inside a monitored category.
+// guild can be null (falls back to explicit channels only).
+function getEffectiveMonitoredChannelIds(guildId, guild) {
+  const cfg = ensureGuildConfig(guildId);
+  const ids = new Set(cfg.monitoredChannels);
+  if (guild && cfg.monitoredCategoryIds?.length) {
+    for (const ch of guild.channels.cache.values()) {
+      if (
+        ch.parentId &&
+        cfg.monitoredCategoryIds.includes(ch.parentId) &&
+        (ch.type === ChannelType.GuildVoice || ch.type === ChannelType.GuildStageVoice)
+      ) {
+        ids.add(ch.id);
+      }
+    }
+  }
+  return ids;
 }
 
 function getExemptRoles(guildId) {
@@ -664,6 +689,7 @@ function buildMainMenuMessage() {
 function buildCameraMenuMessage(guildId) {
   const cfg = ensureGuildConfig(guildId);
 
+  const catCount = cfg.monitoredCategoryIds?.length ?? 0;
   const embed = new EmbedBuilder()
     .setColor(0x2b2d31)
     .setTitle('📷 Camera Policy Configuration')
@@ -672,6 +698,7 @@ function buildCameraMenuMessage(guildId) {
         `**Timing:** ${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES}m grace + ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES}m warning\n` +
         `**Announcement:** ${cfg.announcementUrl ? `[view post](${cfg.announcementUrl})` : 'Not posted yet'}\n` +
         `**Monitored Channels:** ${cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'Not set'}\n` +
+        `**Monitored Categories:** ${catCount ? cfg.monitoredCategoryIds.map((id) => `<#${id}>`).join(', ') : 'Not set'} ${catCount ? `*(all voice channels inside are monitored)*` : ''}\n` +
         `**Exempt Roles:** ${cfg.exemptRoles.length ? cfg.exemptRoles.map((id) => `<@&${id}>`).join(', ') : 'Not set'}`
     );
 
@@ -686,7 +713,8 @@ function buildCameraMenuMessage(guildId) {
 
   const bottomRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('setup:camera:create-exempt-role').setLabel('Create Exempt Role').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back to Modules').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId('setup:camera:categories-menu').setLabel('🗂 Monitored Categories').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary)
   );
 
   const channelSelect = new ChannelSelectMenuBuilder()
@@ -720,6 +748,41 @@ function buildCameraMenuMessage(guildId) {
       new ActionRowBuilder().addComponents(channelSelect),
       new ActionRowBuilder().addComponents(roleSelect),
       new ActionRowBuilder().addComponents(announceChannelSelect),
+    ],
+  };
+}
+
+// Camera categories sub-page (separate message to avoid the 5-row cap)
+function buildCameraCategoriesMenuMessage(guildId) {
+  const cfg = ensureGuildConfig(guildId);
+  const catCount = cfg.monitoredCategoryIds?.length ?? 0;
+
+  const embed = new EmbedBuilder()
+    .setColor(0x2b2d31)
+    .setTitle('📷 Camera Policy — Monitored Categories')
+    .setDescription(
+      `Select one or more **categories** below. Every voice channel inside a selected category will be treated as a monitored channel — you don't need to add them individually.\n\n` +
+      `**Currently monitored categories:** ${catCount ? cfg.monitoredCategoryIds.map((id) => `<#${id}>`).join(', ') : 'None'}\n\n` +
+      `*This stacks with per-channel selections on the main page — both lists are checked.*`
+    );
+
+  const backRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup:camera:menu').setLabel('⬅ Back to Camera Policy').setStyle(ButtonStyle.Secondary)
+  );
+
+  const categorySelect = new ChannelSelectMenuBuilder()
+    .setCustomId('setup:camera:categories:select')
+    .setPlaceholder('Select monitored categories...')
+    .setChannelTypes(ChannelType.GuildCategory)
+    .setMinValues(0)
+    .setMaxValues(25);
+  if (catCount) categorySelect.setDefaultChannels(...cfg.monitoredCategoryIds.slice(0, 25));
+
+  return {
+    embeds: [embed],
+    components: [
+      backRow,
+      new ActionRowBuilder().addComponents(categorySelect),
     ],
   };
 }
@@ -876,6 +939,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
     if (id === 'setup:camera:menu') return interaction.update(buildCameraMenuMessage(guildId));
+    if (id === 'setup:camera:categories-menu') return interaction.update(buildCameraCategoriesMenuMessage(guildId));
     if (id === 'setup:activity:menu') return interaction.update(buildActivityMenuMessage(guildId));
     if (id === 'setup:activity:roles-menu') return interaction.update(buildActivityRolesMenuMessage(guildId));
     if (id === 'setup:activity:channels-menu') return interaction.update(buildActivityChannelsMenuMessage(guildId));
@@ -901,6 +965,13 @@ client.on('interactionCreate', async (interaction) => {
       cfg.monitoredChannels = interaction.values;
       saveCameraConfig(cameraConfig);
       return interaction.update(buildCameraMenuMessage(guildId));
+    }
+
+    if (id === 'setup:camera:categories:select') {
+      const cfg = ensureGuildConfig(guildId);
+      cfg.monitoredCategoryIds = interaction.values;
+      saveCameraConfig(cameraConfig);
+      return interaction.update(buildCameraCategoriesMenuMessage(guildId));
     }
 
     if (id === 'setup:camera:exempt:select') {
@@ -1345,6 +1416,12 @@ function ensureVcShuffleGuildConfig(guildId) {
       staffRoleIds: [],           // staff roles that always get access to temp rooms
       botRoleId: null,            // bot's own managed role for temp room perms
       warningSeconds: 30,         // how many seconds before bell to post the wrap-up warning
+      // Permanent event channels (created via "Set Up Event Channels")
+      eventCategoryId: null,      // the parent category housing all event channels
+      matchupsChannelId: null,    // text channel where round matchups + session summary post
+      staffPanelChannelId: null,  // staff-only text channel with live control buttons
+      infoChannelId: null,        // member-facing read-only event info channel
+      staffPanelMessageId: null,  // message ID of the staff panel so we can update it
     };
     saveVcShuffleConfig(vcShuffleConfig);
   }
@@ -1367,6 +1444,11 @@ function ensureVcShuffleGuildConfig(guildId) {
   if (vcShuffleConfig[guildId].warningSeconds === undefined) {
     vcShuffleConfig[guildId].warningSeconds = 30;
   }
+  if (vcShuffleConfig[guildId].eventCategoryId === undefined) vcShuffleConfig[guildId].eventCategoryId = null;
+  if (vcShuffleConfig[guildId].matchupsChannelId === undefined) vcShuffleConfig[guildId].matchupsChannelId = null;
+  if (vcShuffleConfig[guildId].staffPanelChannelId === undefined) vcShuffleConfig[guildId].staffPanelChannelId = null;
+  if (vcShuffleConfig[guildId].infoChannelId === undefined) vcShuffleConfig[guildId].infoChannelId = null;
+  if (vcShuffleConfig[guildId].staffPanelMessageId === undefined) vcShuffleConfig[guildId].staffPanelMessageId = null;
   return vcShuffleConfig[guildId];
 }
 
@@ -1685,24 +1767,28 @@ async function runShuffleRound(guild, guildId) {
   cfg.createdChannelIds = newChannelIds;
   saveVcShuffleConfig(vcShuffleConfig);
 
-  // Step 7: announce round start
-  if (cfg.announcementChannelId) {
+  // Step 7: post round matchups — prefer dedicated matchups channel, fall back to announcementChannelId
+  const matchupTarget = cfg.matchupsChannelId || cfg.announcementChannelId;
+  if (matchupTarget) {
     try {
-      const textCh = guild.channels.cache.get(cfg.announcementChannelId);
+      const textCh = guild.channels.cache.get(matchupTarget);
       if (textCh) {
         const groupLines = groups.map((g, i) => `**High Speed Connection ${i + 1}:** ${g.map((m) => m.displayName).join(' ↔ ')}`).join('\n');
         const embed = new EmbedBuilder()
           .setColor(0x8a2be2)
-          .setTitle(`💘 Speed Dating — Round #${round}`)
+          .setTitle(`💘 Speed Dating — Round #${round} Matchups`)
           .setDescription(`${pool.length} member(s) paired across ${groups.length} connection(s)!\n\n${groupLines}`)
-          .setFooter({ text: `Round ends in ~${cfg.minIntervalMinutes} minute(s)` })
+          .setFooter({ text: `Round ends in ~${cfg.minIntervalMinutes} minute(s) · 📹 If your cam dropped, toggle it off and back on!` })
           .setTimestamp();
         await textCh.send({ embeds: [embed] });
       }
     } catch (err) {
-      console.error(`[vc-shuffle] Could not post announcement in guild ${guildId}:`, err.message);
+      console.error(`[vc-shuffle] Could not post matchups in guild ${guildId}:`, err.message);
     }
   }
+
+  // Update the staff panel to reflect the new round
+  await refreshStaffPanel(guild, guildId);
 
   // Step 8: schedule the wrap-up warning (warningSeconds before the bell)
   const roundMs = (cfg.minIntervalMinutes ?? 3) * 60 * 1000;
@@ -1724,6 +1810,66 @@ async function runShuffleRound(guild, guildId) {
   }
 
   console.log(`[vc-shuffle] Guild ${guildId}: round #${round} complete — ${pool.length} members in ${groups.length} rooms`);
+}
+
+// Build the staff panel embed + button row (called to create or refresh the panel)
+function buildStaffPanelContent(guildId) {
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  const state = shuffleState.get(guildId);
+  const running = cfg.enabled;
+  const round = state?.roundNumber ?? 0;
+  const pairs = state?.pairHistory?.size ?? 0;
+  const nextAt = state?.nextShuffleAt ? `<t:${Math.floor(state.nextShuffleAt / 1000)}:R>` : '—';
+  const mode = cfg.minGroupSize === 1 ? '1-on-1' : `${cfg.minGroupSize}v${cfg.minGroupSize}`;
+
+  const embed = new EmbedBuilder()
+    .setColor(running ? 0x8a2be2 : 0x555555)
+    .setTitle('💘 Speed Dating — Staff Control Panel')
+    .setDescription('Live event controls. Buttons below affect the session immediately.')
+    .addFields(
+      { name: 'Status',            value: running ? '🟢 Running' : '🔴 Stopped', inline: true },
+      { name: 'Round',             value: String(round),                           inline: true },
+      { name: 'Mode',              value: mode,                                    inline: true },
+      { name: 'Round length',      value: `${cfg.minIntervalMinutes}m`,            inline: true },
+      { name: 'Next bell',         value: running ? nextAt : '—',                 inline: true },
+      { name: 'Unique pairs',      value: String(pairs),                           inline: true },
+    )
+    .setFooter({ text: 'Updates automatically each round · Staff only' })
+    .setTimestamp();
+
+  const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('spdating:start').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(running),
+    new ButtonBuilder().setCustomId('spdating:bell').setLabel('🔔 Ring Bell').setStyle(ButtonStyle.Primary).setDisabled(!running),
+    new ButtonBuilder().setCustomId('spdating:stop').setLabel('⏹️ End Session').setStyle(ButtonStyle.Danger).setDisabled(!running),
+  );
+
+  return { embeds: [embed], components: [row] };
+}
+
+// Send or update the staff panel message in the staffPanelChannelId
+async function refreshStaffPanel(guild, guildId) {
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  if (!cfg.staffPanelChannelId) return;
+  try {
+    const ch = guild.channels.cache.get(cfg.staffPanelChannelId);
+    if (!ch) return;
+    const content = buildStaffPanelContent(guildId);
+    if (cfg.staffPanelMessageId) {
+      try {
+        const msg = await ch.messages.fetch(cfg.staffPanelMessageId);
+        await msg.edit(content);
+        return;
+      } catch {
+        // message was deleted — fall through and post a new one
+      }
+    }
+    const msg = await ch.send(content);
+    cfg.staffPanelMessageId = msg.id;
+    saveVcShuffleConfig(vcShuffleConfig);
+  } catch (err) {
+    console.error(`[vc-shuffle] Could not refresh staff panel in guild ${guildId}:`, err.message);
+  }
 }
 
 // Post the bell message to the announcement channel (called just before a new round starts)
@@ -1831,10 +1977,11 @@ async function stopVcShuffle(guild, guildId) {
     }
   }
 
-  // Post session summary to the announcement channel
-  if (cfg.announcementChannelId && state?.pairHistory) {
+  // Post session summary — prefer matchups channel, fall back to announcement channel
+  const summaryTarget = cfg.matchupsChannelId || cfg.announcementChannelId;
+  if (summaryTarget && state?.pairHistory) {
     try {
-      const textCh = guild.channels.cache.get(cfg.announcementChannelId);
+      const textCh = guild.channels.cache.get(summaryTarget);
       if (textCh) {
         const rounds = state.roundNumber ?? 0;
         const pairs = state.pairHistory.size;
@@ -1856,6 +2003,9 @@ async function stopVcShuffle(guild, guildId) {
   }
 
   shuffleState.delete(guildId);
+
+  // Refresh staff panel to show stopped state
+  await refreshStaffPanel(guild, guildId);
 }
 
 // Re-arm shuffles on bot restart for any guild that had it enabled
@@ -2359,6 +2509,7 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.commandName === 'camera-status') {
       const cfg = ensureGuildConfig(interaction.guildId);
+      const effectiveIds = getEffectiveMonitoredChannelIds(interaction.guildId, interaction.guild);
       const embed = new EmbedBuilder()
         .setColor(cfg.enabled ? 0x00cc66 : 0x999999)
         .setTitle('📷 Camera Policy Status')
@@ -2367,8 +2518,12 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Grace period', value: `${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES} minute(s)`, inline: true },
           { name: 'Warning period', value: `${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES} minute(s)`, inline: true },
           {
-            name: `Monitored channels (${cfg.monitoredChannels.length})`,
+            name: `Monitored channels (${cfg.monitoredChannels.length} explicit, ${effectiveIds.size} effective)`,
             value: cfg.monitoredChannels.length ? cfg.monitoredChannels.map((id) => `<#${id}>`).join(', ') : 'None',
+          },
+          {
+            name: `Monitored categories (${cfg.monitoredCategoryIds?.length ?? 0})`,
+            value: cfg.monitoredCategoryIds?.length ? cfg.monitoredCategoryIds.map((id) => `<#${id}>`).join(', ') : 'None — all voice in these categories auto-monitored',
           },
           {
             name: `Exempt roles (${cfg.exemptRoles.length})`,
@@ -2937,6 +3092,64 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ============================================================
+// Speed Dating — Staff Panel Button Handler
+// Handles buttons posted in the staff panel channel
+// ============================================================
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+  if (!interaction.customId.startsWith('spdating:')) return;
+
+  const guildId = interaction.guildId;
+  const guild = interaction.guild;
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+
+  // Only allow staff/admins to use these buttons
+  const isStaff = interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ||
+    (cfg.staffRoleIds || []).some((id) => interaction.member?.roles?.cache?.has(id));
+  if (!isStaff) {
+    return interaction.reply({ content: '❌ These controls are for staff only.', flags: MessageFlags.Ephemeral });
+  }
+
+  const action = interaction.customId.split(':')[1];
+
+  try {
+    await interaction.deferUpdate(); // update the button message in place
+
+    if (action === 'start') {
+      if (!cfg.lobbyChannelIds.length) {
+        return interaction.followUp({ content: '❌ No lobby channels configured — set them in the dashboard first.', flags: MessageFlags.Ephemeral });
+      }
+      await startVcShuffle(guild, guildId, true);
+    }
+
+    else if (action === 'bell') {
+      const state = shuffleState.get(guildId);
+      if (state?.warningTimeoutId) {
+        clearTimeout(state.warningTimeoutId);
+        if (state) state.warningTimeoutId = null;
+      }
+      await postBellMessage(guild, guildId);
+      await runShuffleRound(guild, guildId);
+      scheduleNextShuffle(guild, guildId);
+    }
+
+    else if (action === 'stop') {
+      await stopVcShuffle(guild, guildId);
+    }
+
+    // refreshStaffPanel is already called inside start/stop/runShuffleRound,
+    // but call it again here to make sure the button state updates immediately after deferUpdate
+    await refreshStaffPanel(guild, guildId);
+
+  } catch (err) {
+    console.error('[vc-shuffle] Staff panel button error:', err);
+    try {
+      await interaction.followUp({ content: '❌ Something went wrong — check the terminal.', flags: MessageFlags.Ephemeral });
+    } catch { /* best effort */ }
+  }
+});
+
+// ============================================================
 // Cameras-On voice channel policy — enforcement
 // ============================================================
 // Two-stage, low-noise design:
@@ -2986,7 +3199,7 @@ async function handleCameraOff(member, channel) {
       }
 
       const currentVoiceChannel = member.voice?.channel;
-      const stillInMonitoredChannel = currentVoiceChannel && getMonitoredChannels(guildId).includes(currentVoiceChannel.id);
+      const stillInMonitoredChannel = currentVoiceChannel && getEffectiveMonitoredChannelIds(guildId, member.guild).has(currentVoiceChannel.id);
 
       if (!stillInMonitoredChannel || member.voice.selfVideo) {
         warnedUsers.delete(key);
@@ -3007,7 +3220,7 @@ async function handleCameraOff(member, channel) {
           }
 
           const cvc = member.voice?.channel;
-          const stillIn = cvc && getMonitoredChannels(guildId).includes(cvc.id);
+          const stillIn = cvc && getEffectiveMonitoredChannelIds(guildId, member.guild).has(cvc.id);
 
           if (stillIn && !member.voice.selfVideo) {
             await member.voice.disconnect('Camera not enabled within the warning period');
@@ -3057,7 +3270,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const channelId = newState.channelId;
   const memberId = newState.member.id;
 
-  if (!channelId || !getMonitoredChannels(guildId).includes(channelId)) {
+  if (!channelId || !getEffectiveMonitoredChannelIds(guildId, newState.guild).has(channelId)) {
     // Left voice entirely, or moved to an unmonitored channel — clear
     // silently (no "thanks!" message, since they're not even there anymore)
     if (!newState.channelId) {
@@ -3421,10 +3634,19 @@ app.get('/camera', (req, res) => {
   const voiceChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice).values()].sort((a, b) => a.rawPosition - b.rawPosition);
   const textChannels = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement).values()].sort((a, b) => a.rawPosition - b.rawPosition);
   const roles = [...guild.roles.cache.filter((r) => r.id !== guild.id).values()].sort((a, b) => b.position - a.position);
+  const categories = [...guild.channels.cache.filter((c) => c.type === ChannelType.GuildCategory).values()].sort((a, b) => a.rawPosition - b.rawPosition);
+
+  // Compute the effective monitored channel count (explicit + category-derived)
+  const effectiveIds = getEffectiveMonitoredChannelIds(guild.id, guild);
 
   const channelChecklist =
     voiceChannels.map((c) => `<label class="check-item"><input type="checkbox" name="monitoredChannels" value="${c.id}" ${cfg.monitoredChannels.includes(c.id) ? 'checked' : ''}> #${escapeHtml(c.name)}</label>`).join('') ||
     '<p class="muted">No voice channels found.</p>';
+
+  const categoryChecklist =
+    categories.map((c) => `<label class="check-item"><input type="checkbox" name="monitoredCategoryIds" value="${c.id}" ${(cfg.monitoredCategoryIds || []).includes(c.id) ? 'checked' : ''}> 📁 ${escapeHtml(c.name)}</label>`).join('') ||
+    '<p class="muted">No categories found.</p>';
+
   const roleChecklist =
     roles.map((r) => `<label class="check-item"><input type="checkbox" name="exemptRoles" value="${r.id}" ${cfg.exemptRoles.includes(r.id) ? 'checked' : ''}> ${escapeHtml(r.name)}</label>`).join('') ||
     '<p class="muted">No roles found.</p>';
@@ -3435,6 +3657,7 @@ app.get('/camera', (req, res) => {
       <h2>📷 Camera Policy — ${escapeHtml(guild.name)}</h2>
       <p><span class="pill ${cfg.enabled ? 'on' : 'off'}">${cfg.enabled ? 'ENABLED' : 'DISABLED'}</span>
       ${cfg.announcementUrl ? ` · <a href="${cfg.announcementUrl}" target="_blank" rel="noopener">View posted announcement ↗</a>` : ''}</p>
+      <p class="muted">Effectively monitoring <strong>${effectiveIds.size}</strong> voice channel(s) — ${cfg.monitoredChannels.length} explicit + ${effectiveIds.size - cfg.monitoredChannels.length} from categories.</p>
       <form method="POST" action="/camera/toggle">
         <input type="hidden" name="guild" value="${guildId}">
         <button class="${cfg.enabled ? 'danger' : ''}" type="submit">${cfg.enabled ? 'Disable' : 'Enable'}</button>
@@ -3449,7 +3672,11 @@ app.get('/camera', (req, res) => {
           <div class="field"><label>Grace period (minutes)</label><input type="number" name="graceMinutes" min="0" value="${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES}"></div>
           <div class="field"><label>Warning period (minutes)</label><input type="number" name="warningMinutes" min="1" value="${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES}"></div>
         </div>
-        <h3>Monitored voice channels</h3>
+        <h3>Monitored Categories</h3>
+        <p class="muted">All voice channels inside a checked category are monitored automatically. Stacks with the per-channel list below.</p>
+        <div class="checklist">${categoryChecklist}</div>
+        <h3 style="margin-top:16px;">Monitored Voice Channels</h3>
+        <p class="muted">Individual channels to monitor regardless of category.</p>
         <div class="checklist">${channelChecklist}</div>
         <h3 style="margin-top:16px;">Exempt roles</h3>
         <div class="checklist">${roleChecklist}</div>
@@ -3506,6 +3733,7 @@ app.post('/camera/save', (req, res) => {
   if (Number.isInteger(grace) && grace >= 0) cfg.graceMinutes = grace;
   if (Number.isInteger(warning) && warning >= 1) cfg.warningMinutes = warning;
   cfg.monitoredChannels = asArray(req.body.monitoredChannels);
+  cfg.monitoredCategoryIds = asArray(req.body.monitoredCategoryIds);
   cfg.exemptRoles = asArray(req.body.exemptRoles);
   saveCameraConfig(cameraConfig);
   res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('Saved.')}`);
@@ -4007,6 +4235,32 @@ app.get('/vc-shuffle', (req, res) => {
         <div class="btn-row"><button type="submit">💾 Save Lobbies</button></div>
       </form>
     </div>
+
+    <div class="card">
+      <h3>🏗️ Set Up Event Channels</h3>
+      <p class="muted">Creates the full channel structure in one click — a <strong>💘 Speed Dating</strong> category containing:</p>
+      <ul style="margin:8px 0 12px 18px; color: var(--text-muted); font-size:0.9rem; line-height:1.8;">
+        <li><strong>#speed-dating-info</strong> — member-facing read-only info post (how it works)</li>
+        <li><strong>#speed-dating-matchups</strong> — round pairings + session summary (member-readable)</li>
+        <li><strong>#speed-dating-control</strong> — staff-only panel with live ▶️ 🔔 ⏹️ buttons</li>
+        <li><strong>💘 Speed Dating Lobby</strong> — voice lobby (only created if no lobby is configured yet)</li>
+      </ul>
+      <p class="muted" style="margin-bottom:12px;">
+        ${cfg.eventCategoryId ? `✅ Category already exists — clicking again only creates any missing channels and refreshes the staff panel.` : `⚠️ No event category yet — this will create everything from scratch.`}
+      </p>
+      ${cfg.staffPanelChannelId ? `<p class="muted" style="margin-bottom:12px;">Staff panel: <strong>#${guild.channels.cache.get(cfg.staffPanelChannelId)?.name ?? cfg.staffPanelChannelId}</strong></p>` : ''}
+      ${cfg.matchupsChannelId ? `<p class="muted" style="margin-bottom:12px;">Matchups channel: <strong>#${guild.channels.cache.get(cfg.matchupsChannelId)?.name ?? cfg.matchupsChannelId}</strong></p>` : ''}
+      ${cfg.infoChannelId ? `<p class="muted" style="margin-bottom:4px;">Info channel: <strong>#${guild.channels.cache.get(cfg.infoChannelId)?.name ?? cfg.infoChannelId}</strong></p>` : ''}
+      <p class="muted" style="font-size:0.8rem; margin-top:12px;">
+        ℹ️ Set up <strong>Participant Role</strong>, <strong>Staff Roles</strong>, and <strong>Bot Role</strong> in the Roles card above <em>before</em> running setup — the channel permissions are built from those values.
+      </p>
+      <form method="POST" action="/vc-shuffle/setup-channels">
+        <input type="hidden" name="guild" value="${guildId}">
+        <div class="btn-row" style="margin-top:12px;">
+          <button type="submit">🏗️ ${cfg.eventCategoryId ? 'Re-run Setup / Refresh Panel' : 'Create Event Channels'}</button>
+        </div>
+      </form>
+    </div>
   `;
 
   res.send(renderLayout({ title: 'Speed Dating', guildId, currentPath: '/vc-shuffle', body, flash: req.query.flash }));
@@ -4046,6 +4300,146 @@ app.post('/vc-shuffle/save-lobbies', (req, res) => {
   cfg.lobbyChannelIds = asArray(lobbyChannelIds);
   saveVcShuffleConfig(vcShuffleConfig);
   res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Lobby channels saved!')}`);
+});
+
+app.post('/vc-shuffle/setup-channels', async (req, res) => {
+  const { guild: guildId } = req.body;
+  if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  const { PermissionFlagsBits: PF } = require('discord.js');
+
+  try {
+    // Build staff role + bot role overwrite list for restricted channels
+    const staffAllow = [PF.ViewChannel, PF.SendMessages, PF.ReadMessageHistory, PF.ManageMessages];
+    const botAllow   = [PF.ViewChannel, PF.SendMessages, PF.ReadMessageHistory, PF.ManageMessages, PF.ManageChannels];
+
+    const baseOverwrites = [
+      { id: guild.id, deny: [PF.ViewChannel] }, // @everyone denied by default
+      ...(cfg.staffRoleIds || []).map((id) => ({ id, allow: staffAllow })),
+      ...(cfg.botRoleId ? [{ id: cfg.botRoleId, allow: botAllow }] : []),
+    ];
+
+    const memberReadOnly = [
+      { id: guild.id, deny: [PF.SendMessages, PF.CreatePublicThreads, PF.CreatePrivateThreads] },
+      { id: guild.id, allow: [PF.ViewChannel, PF.ReadMessageHistory] },
+      ...(cfg.staffRoleIds || []).map((id) => ({ id, allow: [...staffAllow, PF.ManageMessages] })),
+      ...(cfg.botRoleId ? [{ id: cfg.botRoleId, allow: botAllow }] : []),
+    ];
+
+    // 1. Create or reuse the event category
+    let category = cfg.eventCategoryId ? guild.channels.cache.get(cfg.eventCategoryId) : null;
+    if (!category) {
+      category = await guild.channels.create({
+        name: '💘 Speed Dating',
+        type: ChannelType.GuildCategory,
+        permissionOverwrites: [{ id: guild.id, deny: [PF.ViewChannel] }],
+        reason: 'Speed Dating event setup',
+      });
+      cfg.eventCategoryId = category.id;
+      // Also use this as the temp room category if not already set
+      if (!cfg.categoryId) cfg.categoryId = category.id;
+    }
+
+    // 2. Create #matchups channel (member-readable, shows round pairings + session summary)
+    let matchupsCh = cfg.matchupsChannelId ? guild.channels.cache.get(cfg.matchupsChannelId) : null;
+    if (!matchupsCh) {
+      matchupsCh = await guild.channels.create({
+        name: 'speed-dating-matchups',
+        type: ChannelType.GuildText,
+        parent: category.id,
+        permissionOverwrites: [
+          ...memberReadOnly,
+          ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.ReadMessageHistory] }] : []),
+        ],
+        reason: 'Speed Dating: matchups channel',
+      });
+      cfg.matchupsChannelId = matchupsCh.id;
+    }
+
+    // 3. Create #speed-dating-info (member-facing read-only event info)
+    let infoCh = cfg.infoChannelId ? guild.channels.cache.get(cfg.infoChannelId) : null;
+    if (!infoCh) {
+      infoCh = await guild.channels.create({
+        name: 'speed-dating-info',
+        type: ChannelType.GuildText,
+        parent: category.id,
+        permissionOverwrites: [
+          ...memberReadOnly,
+          ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.ReadMessageHistory] }] : []),
+        ],
+        reason: 'Speed Dating: info channel',
+      });
+      cfg.infoChannelId = infoCh.id;
+    }
+
+    // 4. Create #speed-dating-control (staff-only panel)
+    let panelCh = cfg.staffPanelChannelId ? guild.channels.cache.get(cfg.staffPanelChannelId) : null;
+    if (!panelCh) {
+      panelCh = await guild.channels.create({
+        name: 'speed-dating-control',
+        type: ChannelType.GuildText,
+        parent: category.id,
+        permissionOverwrites: baseOverwrites,
+        reason: 'Speed Dating: staff control panel',
+      });
+      cfg.staffPanelChannelId = panelCh.id;
+    }
+
+    // 5. Create lobby voice channel if none configured yet
+    if (!cfg.lobbyChannelIds.length) {
+      const lobbyCh = await guild.channels.create({
+        name: '💘 Speed Dating Lobby',
+        type: ChannelType.GuildVoice,
+        parent: category.id,
+        permissionOverwrites: [
+          { id: guild.id, deny: [PF.ViewChannel, PF.Connect] },
+          ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.Connect, PF.Speak, PF.UseVAD, PF.Stream] }] : []),
+          ...(cfg.staffRoleIds || []).map((id) => ({ id, allow: [PF.ViewChannel, PF.Connect, PF.Speak, PF.MoveMembers] })),
+          ...(cfg.botRoleId ? [{ id: cfg.botRoleId, allow: [PF.ViewChannel, PF.Connect, PF.MoveMembers, PF.ManageChannels] }] : []),
+        ],
+        reason: 'Speed Dating: lobby voice channel',
+      });
+      cfg.lobbyChannelIds = [lobbyCh.id];
+    }
+
+    saveVcShuffleConfig(vcShuffleConfig);
+
+    // 6. Post the member-facing info embed in #speed-dating-info
+    try {
+      const existingMessages = await infoCh.messages.fetch({ limit: 5 });
+      const botMessages = existingMessages.filter((m) => m.author.id === guild.members.me?.id);
+      if (botMessages.size === 0) {
+        const infoEmbed = new EmbedBuilder()
+          .setColor(0x8a2be2)
+          .setTitle('💘 Speed Dating — How It Works')
+          .setDescription(
+            `Welcome to Speed Dating! Here's what to expect:\n\n` +
+            `**1. Join the lobby**\nHop into the Speed Dating Lobby voice channel. You'll be automatically entered into the next round.\n\n` +
+            `**2. Get paired**\nWhen the round starts, the bot moves you into a private voice channel with your match(es). Say hi!\n\n` +
+            `**3. The bell rings**\nYou'll get a 30-second warning before the round ends, then the bell rings and everyone rotates to someone new.\n\n` +
+            `**4. No repeats**\nThe bot tracks who you've already talked to and avoids pairing you with the same person twice.\n\n` +
+            `**5. Camera dropped?**\nIf your camera turns off after being moved, just toggle it off and back on — it's a Discord thing, not you.\n\n` +
+            `**6. Matchups**\nEach round's pairings are posted in <#${matchupsCh.id}> so you can look up who you met.`
+          )
+          .setFooter({ text: 'Pairings are posted each round in #speed-dating-matchups' })
+          .setTimestamp();
+        await infoCh.send({ embeds: [infoEmbed] });
+      }
+    } catch (err) {
+      console.error(`[vc-shuffle] Could not post info embed:`, err.message);
+    }
+
+    // 7. Post (or refresh) the staff control panel
+    cfg.staffPanelMessageId = null; // force a fresh post after channel creation
+    saveVcShuffleConfig(vcShuffleConfig);
+    await refreshStaffPanel(guild, guildId);
+
+    res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Event channels created! Check #speed-dating-control for the staff panel.')}`);
+  } catch (err) {
+    console.error('[vc-shuffle] setup-channels error:', err);
+    res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Setup failed — ' + err.message)}`);
+  }
 });
 
 app.post('/vc-shuffle/start', async (req, res) => {
