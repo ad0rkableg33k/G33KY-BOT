@@ -341,13 +341,13 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     activityVoiceSessions.set(key, { joinedAt: Date.now(), channelId: newState.channelId });
   }
 
-  // High-Speed Connection: assign participant role when someone joins a lobby during an active session
+  // Speed dating: assign participant role when someone joins a lobby during an active session
   if (nowInChannel && newState.member && !newState.member.user.bot) {
     const shuffleCfg = vcShuffleConfig[guildId];
     if (shuffleCfg?.enabled && shuffleCfg.participantRoleId && shuffleCfg.lobbyChannelIds?.includes(newState.channelId)) {
       try {
         if (!newState.member.roles.cache.has(shuffleCfg.participantRoleId)) {
-          await newState.member.roles.add(shuffleCfg.participantRoleId, 'High-Speed Connection: joined lobby');
+          await newState.member.roles.add(shuffleCfg.participantRoleId, '💨 High-Speed Connection: joined lobby');
         }
       } catch (err) {
         console.error(`[vc-shuffle] Could not auto-assign participant role to ${userId}:`, err.message);
@@ -1404,14 +1404,14 @@ function ensureVcShuffleGuildConfig(guildId) {
       enabled: false,
       lobbyChannelIds: [],    // channels whose current members are pooled for shuffling
       categoryId: null,       // category to create temp rooms in (null = top-level)
-      // High-Speed Connection defaults: 1-on-1, 3-minute rounds
+      // Speed dating defaults: 1-on-1, 3-minute rounds
       minGroupSize: 1,
       maxGroupSize: 1,
       minIntervalMinutes: 3,
       maxIntervalMinutes: 3,
       announcementChannelId: null, // optional text channel for shuffle announcements
       createdChannelIds: [],   // temp voice channels we made, so we can clean them up
-      // High-Speed Connection extras
+      // Speed dating extras
       participantRoleId: null,    // role assigned when someone joins a lobby; applied to all temp rooms
       staffRoleIds: [],           // staff roles that always get access to temp rooms
       botRoleId: null,            // bot's own managed role for temp room perms
@@ -1425,7 +1425,7 @@ function ensureVcShuffleGuildConfig(guildId) {
     };
     saveVcShuffleConfig(vcShuffleConfig);
   }
-  // Normalize configs saved before High-Speed Connection fields existed
+  // Normalize configs saved before high-speed-connection fields existed
   if (!vcShuffleConfig[guildId].announcementChannelId) {
     vcShuffleConfig[guildId].announcementChannelId = null;
   }
@@ -1501,10 +1501,10 @@ function pairKey(a, b) {
   return a < b ? `${a}:${b}` : `${b}:${a}`;
 }
 
-// High-Speed Connection pairing: respects anti-repeat history, handles odd overflow as trios.
+// Speed-dating pairing: respects anti-repeat history, handles odd overflow as trios.
 // groupSize = target people per room (1 = 1-on-1 → creates pairs; 2 = 2v2; 3 = 3v3)
 // pairHistory = Set of already-used pair keys for this session
-function high-speedconnectionPair(members, groupSize, pairHistory) {
+function speedDatePair(members, groupSize, pairHistory) {
   // For 1-on-1: pair people trying to avoid anyone they've already spoken to.
   // For larger groups: use the generic splitter (history still recorded after).
   if (groupSize >= 2) {
@@ -1564,7 +1564,7 @@ function recordPairs(group, pairHistory) {
   }
 }
 
-// Build the permission overwrites array for a temp High-Speed Connection room.
+// Build the permission overwrites array for a temp high-speed-connection room.
 // participantRoleId gets standard VC perms. staffRoleIds get the same.
 // botRoleId gets full manage perms. @everyone is denied unless there's no participant role.
 function buildRoomPermissions(guild, cfg) {
@@ -1681,7 +1681,7 @@ async function moveEveryoneToLobby(guild, cfg) {
   }
 }
 
-// Core High-Speed Connection round: anti-repeat pairing, named rooms, perms, participant role, warning timer
+// Core high-speed-connection round: anti-repeat pairing, named rooms, perms, participant role, warning timer
 async function runShuffleRound(guild, guildId) {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   if (!cfg.enabled) return;
@@ -1700,7 +1700,7 @@ async function runShuffleRound(guild, guildId) {
   const round = state.roundNumber;
   if (!state.pairHistory) state.pairHistory = new Set();
 
-  console.log(`[vc-shuffle] Guild ${guildId}: starting High-Speed Connection round #${round}`);
+  console.log(`[vc-shuffle] Guild ${guildId}: starting high-speed-connection round #${round}`);
 
   // Step 1: move everyone in temp rooms back to the primary lobby, then delete rooms
   await moveEveryoneToLobby(guild, cfg);
@@ -1718,7 +1718,7 @@ async function runShuffleRound(guild, guildId) {
     for (const member of pool) {
       try {
         if (!member.roles.cache.has(cfg.participantRoleId)) {
-          await member.roles.add(cfg.participantRoleId, 'High-Speed Connection: joined lobby');
+          await member.roles.add(cfg.participantRoleId, '💨 High-Speed Connection: joined lobby');
         }
       } catch (err) {
         console.error(`[vc-shuffle] Could not assign participant role to ${member.id}:`, err.message);
@@ -1727,8 +1727,8 @@ async function runShuffleRound(guild, guildId) {
   }
 
   // Step 4: pair members (anti-repeat, 1-on-1 by default, or configured group size)
-  const targetSize = cfg.minGroupSize; // High-Speed Connection uses a fixed size (min == max for 1v1, 2v2, 3v3)
-  const groups = high-speedconnectionPair(pool, targetSize, state.pairHistory);
+  const targetSize = cfg.minGroupSize; // 💨 high-speed connection uses a fixed size (min == max for 1v1, 2v2, 3v3)
+  const groups = speedDatePair(pool, targetSize, state.pairHistory);
 
   // Record pairs used this round into session history
   for (const group of groups) recordPairs(group, state.pairHistory);
@@ -1747,7 +1747,7 @@ async function runShuffleRound(guild, guildId) {
         type: ChannelType.GuildVoice,
         parent: cfg.categoryId || null,
         permissionOverwrites: permOverwrites,
-        reason: `High-Speed Connection round #${round}`,
+        reason: `💨 High-Speed Connection round #${round}`,
       });
       newChannelIds.push(ch.id);
     } catch (err) {
@@ -1757,7 +1757,7 @@ async function runShuffleRound(guild, guildId) {
 
     for (const member of groups[i]) {
       try {
-        await member.voice.setChannel(ch, `High-Speed Connection round #${round}`);
+        await member.voice.setChannel(ch, `💨 High-Speed Connection round #${round}`);
       } catch (err) {
         console.error(`[vc-shuffle] Could not move member ${member.id} to ${roomName}:`, err.message);
       }
@@ -1899,7 +1899,7 @@ function scheduleNextShuffle(guild, guildId) {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   if (!cfg.enabled) return;
 
-  // High-Speed Connection uses a fixed round length — min and max are the same (set-interval still works)
+  // Speed dating uses a fixed round length — min and max are the same (set-interval still works)
   const delay = randomIntervalMs(cfg);
   const nextAt = Date.now() + delay;
 
@@ -1968,7 +1968,7 @@ async function stopVcShuffle(guild, guildId) {
       for (const member of ch.members.values()) {
         try {
           if (member.roles.cache.has(cfg.participantRoleId)) {
-            await member.roles.remove(cfg.participantRoleId, 'High-Speed Connection: session ended');
+            await member.roles.remove(cfg.participantRoleId, '💨 High-Speed Connection: session ended');
           }
         } catch (err) {
           console.error(`[vc-shuffle] Could not remove participant role from ${member.id}:`, err.message);
@@ -2244,7 +2244,7 @@ const commands = [
     .addSubcommand((sub) =>
       sub
         .setName('set-announce')
-        .setDescription('Set a text channel to post High-speed Connection round announcements in')
+        .setDescription('Set a text channel to post 💨 high-speed connection round announcements in')
         .addChannelOption((opt) => opt.setName('channel').setDescription('Text channel for announcements').setRequired(true))
     )
     .addSubcommand((sub) => sub.setName('shuffle-now').setDescription('Ring the bell and start a new round immediately'))
@@ -2257,7 +2257,7 @@ const commands = [
     .addSubcommand((sub) =>
       sub
         .setName('add-staff-role')
-        .setDescription('Add a staff role that always gets access to temp High-Speed-Connection rooms')
+        .setDescription('Add a staff role that always gets access to temp high-speed-connection rooms')
         .addRoleOption((opt) => opt.setName('role').setDescription('Staff role').setRequired(true))
     )
     .addSubcommand((sub) =>
@@ -2941,7 +2941,7 @@ client.on('interactionCreate', async (interaction) => {
     else if (sub === 'end-session') {
       await interaction.deferReply();
       await stopVcShuffle(guild, guildId);
-      await interaction.editReply(`⏹️ **High-Speed Connection session ended.** Summary posted in the announcement channel (if set).`);
+      await interaction.editReply(`⏹️ **💨 High-Speed Connection session ended.** Summary posted in the announcement channel (if set).`);
     }
 
     else if (sub === 'set-participant-role') {
@@ -2989,7 +2989,7 @@ client.on('interactionCreate', async (interaction) => {
     else if (sub === 'status') {
       const state = shuffleState.get(guildId);
       const nextIn = state?.nextShuffleAt ? `<t:${Math.floor(state.nextShuffleAt / 1000)}:R>` : 'N/A';
-      const groupModeLabel = cfg.minGroupSize === 1 ? '1-on-1 (High-speed connection)' : `${cfg.minGroupSize}v${cfg.minGroupSize}`;
+      const groupModeLabel = cfg.minGroupSize === 1 ? '1-on-1 (💨 high-speed connection)' : `${cfg.minGroupSize}v${cfg.minGroupSize}`;
       const embed = new EmbedBuilder()
         .setColor(cfg.enabled ? 0x8a2be2 : 0x999999)
         .setTitle('💨 High-Speed Connection — Status')
@@ -3092,7 +3092,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ============================================================
-// High-Speed Connection — Staff Panel Button Handler
+// 💨 High-Speed Connection — Staff Panel Button Handler
 // Handles buttons posted in the staff panel channel
 // ============================================================
 client.on('interactionCreate', async (interaction) => {
@@ -4127,7 +4127,7 @@ app.post('/channel-index/save-descriptions', (req, res) => {
   res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('Descriptions saved.')}`);
 });
 
-// ---- High-Speed Connection Dashboard ----
+// ---- 💨 High-Speed Connection Dashboard ----
 app.get('/vc-shuffle', (req, res) => {
   const guildId = resolveGuildId(req);
   const guild = client.guilds.cache.get(guildId);
@@ -4190,14 +4190,14 @@ app.get('/vc-shuffle', (req, res) => {
       <form method="POST" action="/vc-shuffle/save-settings">
         <input type="hidden" name="guild" value="${guildId}">
         <h3>Round Timing</h3>
-        <p class="muted">Set both min and max to the same value for a fixed round length (recommended for high-speed connection).</p>
+        <p class="muted">Set both min and max to the same value for a fixed round length (recommended for 💨 high-speed connection).</p>
         <div class="row">
           <div class="field"><label>Round length — min (minutes)</label><input type="number" name="minIntervalMinutes" min="1" max="60" value="${cfg.minIntervalMinutes ?? 3}"></div>
           <div class="field"><label>Round length — max (minutes)</label><input type="number" name="maxIntervalMinutes" min="1" max="60" value="${cfg.maxIntervalMinutes ?? 3}"></div>
           <div class="field"><label>Warning before bell (seconds)</label><input type="number" name="warningSeconds" min="5" max="300" value="${cfg.warningSeconds ?? 30}"></div>
         </div>
         <h3>Pairing Mode</h3>
-        <p class="muted">1 = 1-on-1 (classic high-speed connection). 2 = 2v2. 3 = 3v3. Set both min and max to the same number.</p>
+        <p class="muted">1 = 1-on-1 (classic 💨 high-speed connection). 2 = 2v2. 3 = 3v3. Set both min and max to the same number.</p>
         <div class="row">
           <div class="field"><label>Group size (min)</label><input type="number" name="minGroupSize" min="1" max="10" value="${cfg.minGroupSize ?? 1}"></div>
           <div class="field"><label>Group size (max)</label><input type="number" name="maxGroupSize" min="1" max="10" value="${cfg.maxGroupSize ?? 1}"></div>
@@ -4263,7 +4263,7 @@ app.get('/vc-shuffle', (req, res) => {
     </div>
   `;
 
-  res.send(renderLayout({ title: 'High-Speed Connection', guildId, currentPath: '/vc-shuffle', body, flash: req.query.flash }));
+  res.send(renderLayout({ title: '💨 High-Speed Connection', guildId, currentPath: '/vc-shuffle', body, flash: req.query.flash }));
 });
 
 app.post('/vc-shuffle/save-settings', (req, res) => {
@@ -4272,14 +4272,14 @@ app.post('/vc-shuffle/save-settings', (req, res) => {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   cfg.minIntervalMinutes = Math.max(1, parseInt(minIntervalMinutes, 10) || 3);
   cfg.maxIntervalMinutes = Math.max(cfg.minIntervalMinutes, parseInt(maxIntervalMinutes, 10) || 3);
-  // High-Speed connection supports group size of 1 (1-on-1)
+  // Speed dating supports group size of 1 (1-on-1)
   cfg.minGroupSize = Math.max(1, parseInt(minGroupSize, 10) || 1);
   cfg.maxGroupSize = Math.max(cfg.minGroupSize, parseInt(maxGroupSize, 10) || 1);
   cfg.categoryId = categoryId || null;
   cfg.announcementChannelId = announcementChannelId || null;
   cfg.warningSeconds = Math.min(300, Math.max(5, parseInt(warningSeconds, 10) || 30));
   saveVcShuffleConfig(vcShuffleConfig);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('High-Speed connection settings saved!')}`);
+  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Speed dating settings saved!')}`);
 });
 
 app.post('/vc-shuffle/save-roles', (req, res) => {
@@ -4334,7 +4334,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
         name: '💨 High-Speed Connection',
         type: ChannelType.GuildCategory,
         permissionOverwrites: [{ id: guild.id, deny: [PF.ViewChannel] }],
-        reason: 'High-Speed Connection event setup',
+        reason: '💨 High-Speed Connection event setup',
       });
       cfg.eventCategoryId = category.id;
       // Also use this as the temp room category if not already set
@@ -4352,7 +4352,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
           ...memberReadOnly,
           ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.ReadMessageHistory] }] : []),
         ],
-        reason: 'High-Speed Connection: matchups channel',
+        reason: '💨 High-Speed Connection: matchups channel',
       });
       cfg.matchupsChannelId = matchupsCh.id;
     }
@@ -4368,7 +4368,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
           ...memberReadOnly,
           ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.ReadMessageHistory] }] : []),
         ],
-        reason: 'High-Speed Connection: info channel',
+        reason: '💨 High-Speed Connection: info channel',
       });
       cfg.infoChannelId = infoCh.id;
     }
@@ -4381,7 +4381,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
         type: ChannelType.GuildText,
         parent: category.id,
         permissionOverwrites: baseOverwrites,
-        reason: 'High-Speed Connection: staff control panel',
+        reason: '💨 High-Speed Connection: staff control panel',
       });
       cfg.staffPanelChannelId = panelCh.id;
     }
@@ -4398,7 +4398,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
           ...(cfg.staffRoleIds || []).map((id) => ({ id, allow: [PF.ViewChannel, PF.Connect, PF.Speak, PF.MoveMembers] })),
           ...(cfg.botRoleId ? [{ id: cfg.botRoleId, allow: [PF.ViewChannel, PF.Connect, PF.MoveMembers, PF.ManageChannels] }] : []),
         ],
-        reason: 'High-Speed Connection: lobby voice channel',
+        reason: '💨 High-Speed Connection: lobby voice channel',
       });
       cfg.lobbyChannelIds = [lobbyCh.id];
     }
@@ -4414,8 +4414,8 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
           .setColor(0x8a2be2)
           .setTitle('💨 High-Speed Connection — How It Works')
           .setDescription(
-            `Welcome to High-Speed Connection! Here's what to expect:\n\n` +
-            `**1. Join the lobby**\nHop into the High-Speed Connection Lobby voice channel. You'll be automatically entered into the next round.\n\n` +
+            `Welcome to 💨 High-Speed Connection! Here's what to expect:\n\n` +
+            `**1. Join the lobby**\nHop into the 💨 High-Speed Connection Lobby voice channel. You'll be automatically entered into the next round.\n\n` +
             `**2. Get paired**\nWhen the round starts, the bot moves you into a private voice channel with your match(es). Say hi!\n\n` +
             `**3. The bell rings**\nYou'll get a 30-second warning before the round ends, then the bell rings and everyone rotates to someone new.\n\n` +
             `**4. No repeats**\nThe bot tracks who you've already talked to and avoids pairing you with the same person twice.\n\n` +
