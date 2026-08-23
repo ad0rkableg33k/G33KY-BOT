@@ -1501,24 +1501,29 @@ function pairKey(a, b) {
   return a < b ? `${a}:${b}` : `${b}:${a}`;
 }
 
-// Speed-dating pairing: respects anti-repeat history, handles odd overflow as trios.
-// groupSize = target people per room (1 = 1-on-1 → creates pairs; 2 = 2v2; 3 = 3v3)
+// Speed-dating pairing: 1-on-1 with anti-repeat history, odd person always folded into a trio.
+// Never produces a solo room — if there's only 1 person they get added to the smallest group.
+// groupSize: 1 = 1-on-1 pairs (default speed dating), 2+ = small groups via splitIntoGroups
 // pairHistory = Set of already-used pair keys for this session
 function speedDatePair(members, groupSize, pairHistory) {
-  // For 1-on-1: pair people trying to avoid anyone they've already spoken to.
-  // For larger groups: use the generic splitter (history still recorded after).
+  if (members.length === 0) return [];
+
+  // Group mode (2v2, 3v3, etc) — use generic splitter, no anti-repeat needed
   if (groupSize >= 2) {
     return splitIntoGroups(members, groupSize, groupSize);
   }
 
-  // 1-on-1 mode: Hungarian-style greedy with anti-repeat preference
-  const pool = shuffleArray(members); // random starting order
+  // 1-on-1 mode: greedy anti-repeat pairing
+  // Try to pair each person with someone they haven't met this session.
+  // Fall back to a repeat only if everyone's already met everyone.
+  const pool = shuffleArray(members);
   const paired = new Set();
   const groups = [];
 
   for (let i = 0; i < pool.length; i++) {
     if (paired.has(pool[i].id)) continue;
-    // Find the first unpaired partner we haven't already met
+
+    // Prefer an unmet partner
     let partner = null;
     for (let j = i + 1; j < pool.length; j++) {
       if (paired.has(pool[j].id)) continue;
@@ -1527,15 +1532,13 @@ function speedDatePair(members, groupSize, pairHistory) {
         break;
       }
     }
-    // Fallback: if everyone is already a repeat, just grab the next unpaired person
+    // Fallback: already met everyone — grab any unpaired person
     if (!partner) {
       for (let j = i + 1; j < pool.length; j++) {
-        if (!paired.has(pool[j].id)) {
-          partner = pool[j];
-          break;
-        }
+        if (!paired.has(pool[j].id)) { partner = pool[j]; break; }
       }
     }
+
     if (partner) {
       paired.add(pool[i].id);
       paired.add(partner.id);
@@ -1543,13 +1546,22 @@ function speedDatePair(members, groupSize, pairHistory) {
     }
   }
 
-  // Odd person out: fold them into the last group as a trio
+  // Anyone left unpaired (odd-person-out) gets folded into the smallest existing group.
+  // We NEVER create a solo room — the odd person always becomes part of a trio.
   const unpaired = pool.filter((m) => !paired.has(m.id));
-  if (unpaired.length && groups.length > 0) {
-    groups[groups.length - 1].push(...unpaired);
-  } else if (unpaired.length) {
-    // Edge case: only 1 person in the whole pool — put them alone
-    groups.push(unpaired);
+  if (unpaired.length > 0) {
+    if (groups.length > 0) {
+      // Sort by size ascending, add odd person to smallest group, then restore order
+      const indexed = groups.map((g, i) => ({ g, i }));
+      indexed.sort((a, b) => a.g.length - b.g.length);
+      indexed[0].g.push(...unpaired);
+      indexed.sort((a, b) => a.i - b.i);
+      groups.length = 0;
+      indexed.forEach(({ g }) => groups.push(g));
+    } else {
+      // Only 1 or 2 people total — one group is fine
+      groups.push(unpaired);
+    }
   }
 
   return groups;
@@ -1769,7 +1781,7 @@ async function runShuffleRound(guild, guildId) {
   for (let i = 0; i < groups.length; i++) {
     if (i > 0) await new Promise((r) => setTimeout(r, 800));
 
-    const roomName = `High Speed Connection ${i + 1}`;
+    const roomName = `💨・ᴄᴏɴɴᴇᴄᴛɪᴏɴ・${i + 1}`;
     let ch;
     try {
       ch = await guild.channels.create({
@@ -1836,7 +1848,7 @@ async function runShuffleRound(guild, guildId) {
     try {
       const textCh = guild.channels.cache.get(matchupTarget);
       if (textCh) {
-        const groupLines = groups.map((g, i) => `**High Speed Connection ${i + 1}:** ${g.map((m) => m.displayName).join(' ↔ ')}`).join('\n');
+        const groupLines = groups.map((g, i) => `**💨・ᴄᴏɴɴᴇᴄᴛɪᴏɴ・${i + 1}:** ${g.map((m) => m.displayName).join(' ↔ ')}`).join('\n');
         const embed = new EmbedBuilder()
           .setColor(0x8a2be2)
           .setTitle(`💨 High-Speed Connection — Round #${round} Matchups`)
@@ -2077,8 +2089,8 @@ client.once('clientReady', () => {
     if (!cfg.enabled) continue;
     const guild = client.guilds.cache.get(guildId);
     if (!guild) continue;
-    console.log(`[vc-shuffle] Resuming shuffle for guild ${guildId}`);
-    shuffleState.set(guildId, { roundNumber: 0 });
+    console.log(`[vc-dating] Resuming speed dating session for guild ${guildId} after restart`);
+    shuffleState.set(guildId, { roundNumber: 0, pairHistory: new Set() });
     scheduleNextShuffle(guild, guildId);
   }
 });
@@ -3366,6 +3378,61 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   }
 });
 
+// ── VC Speed Dating: mid-round solo rescue ──────────────────────────────────
+// If someone leaves their date room mid-round and their partner ends up alone,
+// move that lone person into the smallest other active date room immediately.
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  const guildId = oldState.guild?.id;
+  if (!guildId) return;
+
+  const cfg = vcShuffleConfig[guildId];
+  if (!cfg?.enabled || !cfg.createdChannelIds?.length) return;
+
+  // Only care about someone LEAVING one of our temp date rooms
+  const leftChannelId = oldState.channelId;
+  if (!leftChannelId || !cfg.createdChannelIds.includes(leftChannelId)) return;
+
+  // Brief settle delay — Discord fires voiceStateUpdate before cache updates
+  await new Promise((r) => setTimeout(r, 800));
+
+  const guild = oldState.guild;
+  const leftChannel = guild.channels.cache.get(leftChannelId);
+  if (!leftChannel) return;
+
+  // Check if exactly 1 human remains in the room they left
+  const remaining = [...leftChannel.members.values()].filter((m) => !m.user.bot);
+  if (remaining.length !== 1) return;
+
+  const lonePerson = remaining[0];
+
+  // Find the smallest other active date room with at least 1 person in it
+  const otherRooms = cfg.createdChannelIds
+    .filter((id) => id !== leftChannelId)
+    .map((id) => guild.channels.cache.get(id))
+    .filter((ch) => ch && ch.members.filter((m) => !m.user.bot).size >= 1)
+    .sort((a, b) => a.members.filter((m) => !m.user.bot).size - b.members.filter((m) => !m.user.bot).size);
+
+  if (!otherRooms.length) return; // no other rooms to rescue into
+
+  const destination = otherRooms[0];
+
+  try {
+    await lonePerson.voice.setChannel(destination, '💨 Speed Dating: rescued from solo room');
+    console.log(`[vc-dating] Rescued ${lonePerson.displayName} from solo room into ${destination.name}`);
+
+    // Announce the rescue if there's an announcement channel
+    if (cfg.matchupsChannelId || cfg.announcementChannelId) {
+      const textChId = cfg.matchupsChannelId || cfg.announcementChannelId;
+      const textCh = guild.channels.cache.get(textChId);
+      if (textCh) {
+        await textCh.send(`🔄 **${lonePerson.displayName}** was left alone — moved them into **${destination.name}**!`);
+      }
+    }
+  } catch (err) {
+    console.error(`[vc-dating] Could not rescue ${lonePerson.displayName} from solo room:`, err.message);
+  }
+});
+
 // Prevent one bad interaction, network hiccup, or unexpected error from
 // crashing the whole bot process. It gets logged instead, and the bot stays online.
 client.on('error', (err) => {
@@ -4411,7 +4478,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     let category = cfg.eventCategoryId ? guild.channels.cache.get(cfg.eventCategoryId) : null;
     if (!category) {
       category = await createThenOverwrite(
-        { name: '💨 High-Speed Connection', type: ChannelType.GuildCategory },
+        { name: '💨・ʜɪɢʜ-ꜱᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ', type: ChannelType.GuildCategory },
         [
           { id: guild.id, deny: [PF.ViewChannel] },
           { id: client.user.id, allow: [PF.ViewChannel, PF.ManageChannels, PF.ManageRoles] },
@@ -4426,7 +4493,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     let matchupsCh = cfg.matchupsChannelId ? guild.channels.cache.get(cfg.matchupsChannelId) : null;
     if (!matchupsCh) {
       matchupsCh = await createThenOverwrite(
-        { name: 'high-speed-connection-matchups', type: ChannelType.GuildText, parent: category.id },
+        { name: '💨・ᴍᴀᴛᴄʜ-ᴜᴘꜱ', type: ChannelType.GuildText, parent: category.id },
         [
           ...memberReadOnly,
           ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.ReadMessageHistory] }] : []),
@@ -4440,7 +4507,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     let infoCh = cfg.infoChannelId ? guild.channels.cache.get(cfg.infoChannelId) : null;
     if (!infoCh) {
       infoCh = await createThenOverwrite(
-        { name: 'high-speed-connection-info', type: ChannelType.GuildText, parent: category.id },
+        { name: '💨・ɪɴꜰᴏ', type: ChannelType.GuildText, parent: category.id },
         [
           ...memberReadOnly,
           ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.ReadMessageHistory] }] : []),
@@ -4454,7 +4521,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     let panelCh = cfg.staffPanelChannelId ? guild.channels.cache.get(cfg.staffPanelChannelId) : null;
     if (!panelCh) {
       panelCh = await createThenOverwrite(
-        { name: 'high-speed-connection-control', type: ChannelType.GuildText, parent: category.id },
+        { name: '💨・ꜱᴛᴀꜰꜰ・ᴘᴀɴᴇʟ', type: ChannelType.GuildText, parent: category.id },
         baseOverwrites,
         '💨 High-Speed Connection: staff control panel'
       );
@@ -4464,7 +4531,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     // 5. Create lobby voice channel if none configured yet
     if (!cfg.lobbyChannelIds.length) {
       const lobbyCh = await createThenOverwrite(
-        { name: '💨 High-Speed Connection Lobby', type: ChannelType.GuildVoice, parent: category.id },
+        { name: '💨・ʟᴏʙʙʏ', type: ChannelType.GuildVoice, parent: category.id },
         [
           { id: guild.id, deny: [PF.ViewChannel, PF.Connect] },
           { id: client.user.id, allow: [PF.ViewChannel, PF.Connect, PF.MoveMembers, PF.ManageChannels] },
