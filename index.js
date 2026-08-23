@@ -1760,9 +1760,15 @@ async function runShuffleRound(guild, guildId) {
   // Step 5: build room permissions
   const permOverwrites = buildRoomPermissions(guild, cfg);
 
-  // Step 6: create temp channels and move people in
+  // Step 6: create temp channels and move people in.
+  // IMPORTANT: we do NOT pass permissionOverwrites to guild.channels.create() —
+  // setting overwrites at creation time requires ManageRoles, which the bot may not
+  // have. Instead we create the channel open, then apply overwrites + member-specific
+  // allows separately. ManageChannels alone is sufficient for creation.
   const newChannelIds = [];
   for (let i = 0; i < groups.length; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 800));
+
     const roomName = `High Speed Connection ${i + 1}`;
     let ch;
     try {
@@ -1770,13 +1776,29 @@ async function runShuffleRound(guild, guildId) {
         name: roomName,
         type: ChannelType.GuildVoice,
         parent: cfg.categoryId || null,
-        permissionOverwrites: permOverwrites,
         reason: `💨 High-Speed Connection round #${round}`,
       });
       newChannelIds.push(ch.id);
     } catch (err) {
-      console.error(`[vc-shuffle] Could not create channel "${roomName}" in guild ${guildId}:`, err.message);
+      console.error(`[vc-shuffle] Could not create channel "${roomName}" in guild ${guildId}: ${err.message}`);
+      if (cfg.announcementChannelId) {
+        try {
+          const textCh = guild.channels.cache.get(cfg.announcementChannelId);
+          if (textCh) await textCh.send(`⚠️ Couldn't create **${roomName}** — ${err.message}. Make sure the bot has **Manage Channels** permission.`);
+        } catch { /* best effort */ }
+      }
       continue;
+    }
+
+    // Apply role-level permission overwrites now that the channel exists.
+    // This uses ManageRoles if available; if the bot lacks it we skip silently —
+    // the channel will just be open to everyone which is fine for most servers.
+    if (permOverwrites.length > 0) {
+      try {
+        await ch.permissionOverwrites.set(permOverwrites, `VC Speed Dating round #${round}`);
+      } catch (err) {
+        console.warn(`[vc-shuffle] Could not set role overwrites on ${roomName} (bot may lack ManageRoles) — channel will be open: ${err.message}`);
+      }
     }
 
     // Grant each assigned member a user-level Connect allow on this specific channel.
@@ -4350,6 +4372,21 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   const { PermissionFlagsBits: PF } = require('discord.js');
 
+  // Helper: create a channel without overwrites, then apply them separately.
+  // Creating with permissionOverwrites requires ManageRoles; applying after only needs ManageChannels.
+  async function createThenOverwrite(options, overwrites, reason) {
+    const { permissionOverwrites: _ignored, ...rest } = options;
+    const ch = await guild.channels.create({ ...rest, reason });
+    if (overwrites && overwrites.length > 0) {
+      try {
+        await ch.permissionOverwrites.set(overwrites, reason);
+      } catch (err) {
+        console.warn(`[vc-shuffle] setup-channels: could not apply overwrites to ${ch.name} (bot may lack ManageRoles) — channel will use category defaults: ${err.message}`);
+      }
+    }
+    return ch;
+  }
+
   try {
     // Build staff role + bot role overwrite list for restricted channels
     const staffAllow = [PF.ViewChannel, PF.SendMessages, PF.ReadMessageHistory, PF.ManageMessages];
@@ -4357,6 +4394,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
 
     const baseOverwrites = [
       { id: guild.id, deny: [PF.ViewChannel] }, // @everyone denied by default
+      { id: client.user.id, allow: [PF.ViewChannel, PF.SendMessages, PF.ReadMessageHistory, PF.ManageMessages, PF.ManageChannels] },
       ...(cfg.staffRoleIds || []).map((id) => ({ id, allow: staffAllow })),
       ...(cfg.botRoleId ? [{ id: cfg.botRoleId, allow: botAllow }] : []),
     ];
@@ -4364,6 +4402,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     const memberReadOnly = [
       { id: guild.id, deny: [PF.SendMessages, PF.CreatePublicThreads, PF.CreatePrivateThreads] },
       { id: guild.id, allow: [PF.ViewChannel, PF.ReadMessageHistory] },
+      { id: client.user.id, allow: [PF.ViewChannel, PF.SendMessages, PF.ReadMessageHistory, PF.ManageMessages, PF.ManageChannels] },
       ...(cfg.staffRoleIds || []).map((id) => ({ id, allow: [...staffAllow, PF.ManageMessages] })),
       ...(cfg.botRoleId ? [{ id: cfg.botRoleId, allow: botAllow }] : []),
     ];
@@ -4371,76 +4410,70 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     // 1. Create or reuse the event category
     let category = cfg.eventCategoryId ? guild.channels.cache.get(cfg.eventCategoryId) : null;
     if (!category) {
-      category = await guild.channels.create({
-        name: '💨 High-Speed Connection',
-        type: ChannelType.GuildCategory,
-        permissionOverwrites: [{ id: guild.id, deny: [PF.ViewChannel] }],
-        reason: '💨 High-Speed Connection event setup',
-      });
+      category = await createThenOverwrite(
+        { name: '💨 High-Speed Connection', type: ChannelType.GuildCategory },
+        [
+          { id: guild.id, deny: [PF.ViewChannel] },
+          { id: client.user.id, allow: [PF.ViewChannel, PF.ManageChannels, PF.ManageRoles] },
+        ],
+        '💨 High-Speed Connection event setup'
+      );
       cfg.eventCategoryId = category.id;
-      // Also use this as the temp room category if not already set
       if (!cfg.categoryId) cfg.categoryId = category.id;
     }
 
     // 2. Create #matchups channel (member-readable, shows round pairings + session summary)
     let matchupsCh = cfg.matchupsChannelId ? guild.channels.cache.get(cfg.matchupsChannelId) : null;
     if (!matchupsCh) {
-      matchupsCh = await guild.channels.create({
-        name: 'high-speed-connection-matchups',
-        type: ChannelType.GuildText,
-        parent: category.id,
-        permissionOverwrites: [
+      matchupsCh = await createThenOverwrite(
+        { name: 'high-speed-connection-matchups', type: ChannelType.GuildText, parent: category.id },
+        [
           ...memberReadOnly,
           ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.ReadMessageHistory] }] : []),
         ],
-        reason: '💨 High-Speed Connection: matchups channel',
-      });
+        '💨 High-Speed Connection: matchups channel'
+      );
       cfg.matchupsChannelId = matchupsCh.id;
     }
 
     // 3. Create #high-speed-connection-info (member-facing read-only event info)
     let infoCh = cfg.infoChannelId ? guild.channels.cache.get(cfg.infoChannelId) : null;
     if (!infoCh) {
-      infoCh = await guild.channels.create({
-        name: 'high-speed-connection-info',
-        type: ChannelType.GuildText,
-        parent: category.id,
-        permissionOverwrites: [
+      infoCh = await createThenOverwrite(
+        { name: 'high-speed-connection-info', type: ChannelType.GuildText, parent: category.id },
+        [
           ...memberReadOnly,
           ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.ReadMessageHistory] }] : []),
         ],
-        reason: '💨 High-Speed Connection: info channel',
-      });
+        '💨 High-Speed Connection: info channel'
+      );
       cfg.infoChannelId = infoCh.id;
     }
 
     // 4. Create #high-speed-connection-control (staff-only panel)
     let panelCh = cfg.staffPanelChannelId ? guild.channels.cache.get(cfg.staffPanelChannelId) : null;
     if (!panelCh) {
-      panelCh = await guild.channels.create({
-        name: 'high-speed-connection-control',
-        type: ChannelType.GuildText,
-        parent: category.id,
-        permissionOverwrites: baseOverwrites,
-        reason: '💨 High-Speed Connection: staff control panel',
-      });
+      panelCh = await createThenOverwrite(
+        { name: 'high-speed-connection-control', type: ChannelType.GuildText, parent: category.id },
+        baseOverwrites,
+        '💨 High-Speed Connection: staff control panel'
+      );
       cfg.staffPanelChannelId = panelCh.id;
     }
 
     // 5. Create lobby voice channel if none configured yet
     if (!cfg.lobbyChannelIds.length) {
-      const lobbyCh = await guild.channels.create({
-        name: '💨 High-Speed Connection Lobby',
-        type: ChannelType.GuildVoice,
-        parent: category.id,
-        permissionOverwrites: [
+      const lobbyCh = await createThenOverwrite(
+        { name: '💨 High-Speed Connection Lobby', type: ChannelType.GuildVoice, parent: category.id },
+        [
           { id: guild.id, deny: [PF.ViewChannel, PF.Connect] },
+          { id: client.user.id, allow: [PF.ViewChannel, PF.Connect, PF.MoveMembers, PF.ManageChannels] },
           ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.Connect, PF.Speak, PF.UseVAD, PF.Stream] }] : []),
           ...(cfg.staffRoleIds || []).map((id) => ({ id, allow: [PF.ViewChannel, PF.Connect, PF.Speak, PF.MoveMembers] })),
           ...(cfg.botRoleId ? [{ id: cfg.botRoleId, allow: [PF.ViewChannel, PF.Connect, PF.MoveMembers, PF.ManageChannels] }] : []),
         ],
-        reason: '💨 High-Speed Connection: lobby voice channel',
-      });
+        '💨 High-Speed Connection: lobby voice channel'
+      );
       cfg.lobbyChannelIds = [lobbyCh.id];
     }
 
