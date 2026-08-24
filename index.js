@@ -1501,29 +1501,24 @@ function pairKey(a, b) {
   return a < b ? `${a}:${b}` : `${b}:${a}`;
 }
 
-// Speed-dating pairing: 1-on-1 with anti-repeat history, odd person always folded into a trio.
-// Never produces a solo room — if there's only 1 person they get added to the smallest group.
-// groupSize: 1 = 1-on-1 pairs (default speed dating), 2+ = small groups via splitIntoGroups
+// Speed-dating pairing: respects anti-repeat history, handles odd overflow as trios.
+// groupSize = target people per room (1 = 1-on-1 → creates pairs; 2 = 2v2; 3 = 3v3)
 // pairHistory = Set of already-used pair keys for this session
 function speedDatePair(members, groupSize, pairHistory) {
-  if (members.length === 0) return [];
-
-  // Group mode (2v2, 3v3, etc) — use generic splitter, no anti-repeat needed
+  // For 1-on-1: pair people trying to avoid anyone they've already spoken to.
+  // For larger groups: use the generic splitter (history still recorded after).
   if (groupSize >= 2) {
     return splitIntoGroups(members, groupSize, groupSize);
   }
 
-  // 1-on-1 mode: greedy anti-repeat pairing
-  // Try to pair each person with someone they haven't met this session.
-  // Fall back to a repeat only if everyone's already met everyone.
-  const pool = shuffleArray(members);
+  // 1-on-1 mode: Hungarian-style greedy with anti-repeat preference
+  const pool = shuffleArray(members); // random starting order
   const paired = new Set();
   const groups = [];
 
   for (let i = 0; i < pool.length; i++) {
     if (paired.has(pool[i].id)) continue;
-
-    // Prefer an unmet partner
+    // Find the first unpaired partner we haven't already met
     let partner = null;
     for (let j = i + 1; j < pool.length; j++) {
       if (paired.has(pool[j].id)) continue;
@@ -1532,13 +1527,15 @@ function speedDatePair(members, groupSize, pairHistory) {
         break;
       }
     }
-    // Fallback: already met everyone — grab any unpaired person
+    // Fallback: if everyone is already a repeat, just grab the next unpaired person
     if (!partner) {
       for (let j = i + 1; j < pool.length; j++) {
-        if (!paired.has(pool[j].id)) { partner = pool[j]; break; }
+        if (!paired.has(pool[j].id)) {
+          partner = pool[j];
+          break;
+        }
       }
     }
-
     if (partner) {
       paired.add(pool[i].id);
       paired.add(partner.id);
@@ -1546,22 +1543,13 @@ function speedDatePair(members, groupSize, pairHistory) {
     }
   }
 
-  // Anyone left unpaired (odd-person-out) gets folded into the smallest existing group.
-  // We NEVER create a solo room — the odd person always becomes part of a trio.
+  // Odd person out: fold them into the last group as a trio
   const unpaired = pool.filter((m) => !paired.has(m.id));
-  if (unpaired.length > 0) {
-    if (groups.length > 0) {
-      // Sort by size ascending, add odd person to smallest group, then restore order
-      const indexed = groups.map((g, i) => ({ g, i }));
-      indexed.sort((a, b) => a.g.length - b.g.length);
-      indexed[0].g.push(...unpaired);
-      indexed.sort((a, b) => a.i - b.i);
-      groups.length = 0;
-      indexed.forEach(({ g }) => groups.push(g));
-    } else {
-      // Only 1 or 2 people total — one group is fine
-      groups.push(unpaired);
-    }
+  if (unpaired.length && groups.length > 0) {
+    groups[groups.length - 1].push(...unpaired);
+  } else if (unpaired.length) {
+    // Edge case: only 1 person in the whole pool — put them alone
+    groups.push(unpaired);
   }
 
   return groups;
@@ -1576,28 +1564,12 @@ function recordPairs(group, pairHistory) {
   }
 }
 
-// Build the base permission overwrites array for a temp high-speed-connection room.
-// Returns role-level overwrites only. Member-specific overwrites (for each dater)
-// are added later via ch.permissionOverwrites.edit() right before moving them in —
-// this guarantees they can always Connect even if they lack the participant role.
+// Build the permission overwrites array for a temp high-speed-connection room.
+// participantRoleId gets standard VC perms. staffRoleIds get the same.
+// botRoleId gets full manage perms. @everyone is denied unless there's no participant role.
 function buildRoomPermissions(guild, cfg) {
   const { PermissionFlagsBits: PF } = require('discord.js');
   const overwrites = [];
-
-  // Always give the bot's own user explicit full access so it can move people in
-  // regardless of any role-based deny. This is the most reliable approach — using
-  // the client.user.id user-level overwrite bypasses all role denies.
-  overwrites.push({
-    id: client.user.id,
-    allow: [
-      PF.ViewChannel,
-      PF.Connect,
-      PF.MoveMembers,
-      PF.ManageChannels,
-      PF.ManageRoles,
-      PF.Speak,
-    ],
-  });
 
   // Participant role — the main access gate
   if (cfg.participantRoleId) {
@@ -1614,14 +1586,14 @@ function buildRoomPermissions(guild, cfg) {
         PF.RequestToSpeak,
       ],
     });
-    // Deny @everyone — only participants + explicitly added members can enter
+    // Deny @everyone — only participants can enter
     overwrites.push({
       id: guild.id,
       deny: [PF.ViewChannel, PF.Connect],
     });
   }
 
-  // Staff roles — full moderation access to all date rooms
+  // Staff roles — same access as participants
   for (const roleId of (cfg.staffRoleIds || [])) {
     overwrites.push({
       id: roleId,
@@ -1641,7 +1613,7 @@ function buildRoomPermissions(guild, cfg) {
     });
   }
 
-  // Bot managed role (belt-and-suspenders on top of the user-level override above)
+  // Bot role — needs move/manage to do its job
   if (cfg.botRoleId) {
     overwrites.push({
       id: cfg.botRoleId,
@@ -1718,176 +1690,166 @@ async function runShuffleRound(guild, guildId) {
   const state = shuffleState.get(guildId);
   if (!state) return;
 
-  // Cancel any pending warning from the previous round
-  if (state.warningTimeoutId) {
-    clearTimeout(state.warningTimeoutId);
-    state.warningTimeoutId = null;
-  }
+  // Cancel any pending warning timer from the previous round
+  if (state.warningTimeoutId) { clearTimeout(state.warningTimeoutId); state.warningTimeoutId = null; }
 
   state.roundNumber = (state.roundNumber || 0) + 1;
   const round = state.roundNumber;
   if (!state.pairHistory) state.pairHistory = new Set();
 
-  console.log(`[vc-shuffle] Guild ${guildId}: starting high-speed-connection round #${round}`);
+  console.log(`[vc-shuffle] Guild ${guildId}: starting round #${round}`);
 
-  // Step 1: move everyone in temp rooms back to the primary lobby, then delete rooms
-  await moveEveryoneToLobby(guild, cfg);
-  await cleanupShuffleChannels(guild, cfg);
-
-  // Step 2: collect pool
-  const pool = collectPoolMembers(guild, cfg);
-  if (pool.length < 2) {
-    console.log(`[vc-shuffle] Guild ${guildId}: only ${pool.length} member(s) in pool — skipping round, will retry next interval`);
-    if (cfg.announcementChannelId) {
-      try {
-        const textCh = guild.channels.cache.get(cfg.announcementChannelId);
-        if (textCh) await textCh.send(`⚠️ Not enough people in the lobby for Round #${round} (need at least 2) — waiting for more to join!`);
-      } catch { /* best effort */ }
+  // Collect pool from lobby AND any active cloud rooms (direct swap — no lobby bounce)
+  const cloudRoomIds = cfg.cloudRoomIds || [];
+  const allSourceIds = [...cfg.lobbyChannelIds, ...cloudRoomIds];
+  const seen = new Set();
+  const pool = [];
+  for (const chId of allSourceIds) {
+    const ch = guild.channels.cache.get(chId);
+    if (!ch) continue;
+    for (const member of ch.members.values()) {
+      if (member.user.bot || seen.has(member.id)) continue;
+      seen.add(member.id);
+      pool.push(member);
     }
-    // Still reschedule — don't leave the session stuck because of a temporarily empty lobby
+  }
+
+  const matchupTarget = cfg.matchupsChannelId || cfg.announcementChannelId;
+  const matchupCh = matchupTarget ? guild.channels.cache.get(matchupTarget) : null;
+
+  if (pool.length < 2) {
+    console.log(`[vc-shuffle] Guild ${guildId}: only ${pool.length} member(s) — skipping round`);
+    if (matchupCh) {
+      const msg = await matchupCh.send(`⚠️ Not enough people in the lobby for Round #${round} — waiting for more to join!`).catch(() => null);
+      if (msg) setTimeout(() => msg.delete().catch(() => {}), 15000);
+    }
     scheduleNextShuffle(guild, guildId);
     return;
   }
 
-  // Step 3: assign participant role to anyone in the lobby who doesn't have it yet
+  // Assign participant role
   if (cfg.participantRoleId) {
     for (const member of pool) {
-      try {
-        if (!member.roles.cache.has(cfg.participantRoleId)) {
-          await member.roles.add(cfg.participantRoleId, '💨 High-Speed Connection: joined lobby');
-        }
-      } catch (err) {
-        console.error(`[vc-shuffle] Could not assign participant role to ${member.id}:`, err.message);
-      }
+      if (!member.roles.cache.has(cfg.participantRoleId))
+        await member.roles.add(cfg.participantRoleId, '💨 HSC: joined session').catch(() => {});
     }
   }
 
-  // Step 4: pair members (anti-repeat, 1-on-1 by default, or configured group size)
-  const targetSize = cfg.minGroupSize; // 💨 high-speed connection uses a fixed size (min == max for 1v1, 2v2, 3v3)
+  // Pair members
+  const targetSize = cfg.minGroupSize ?? 1;
   const groups = speedDatePair(pool, targetSize, state.pairHistory);
-
-  // Record pairs used this round into session history
   for (const group of groups) recordPairs(group, state.pairHistory);
 
-  // Step 5: build room permissions
-  const permOverwrites = buildRoomPermissions(guild, cfg);
+  // Countdown on round 1
+  if (round === 1 && matchupCh) {
+    for (const num of ['5️⃣', '4️⃣', '3️⃣', '2️⃣', '1️⃣']) {
+      const m = await matchupCh.send(num).catch(() => null);
+      await new Promise((r) => setTimeout(r, 1000));
+      if (m) m.delete().catch(() => {});
+    }
+    const goMsg = await matchupCh.send('💨 **GO!**').catch(() => null);
+    if (goMsg) setTimeout(() => goMsg.delete().catch(() => {}), 3000);
+  }
 
-  // Step 6: create temp channels and move people in.
-  // IMPORTANT: we do NOT pass permissionOverwrites to guild.channels.create() —
-  // setting overwrites at creation time requires ManageRoles, which the bot may not
-  // have. Instead we create the channel open, then apply overwrites + member-specific
-  // allows separately. ManageChannels alone is sufficient for creation.
-  const newChannelIds = [];
+  // Direct swap into cloud rooms — no create/delete, just move people room to room
+  const { PermissionFlagsBits: PF } = require('discord.js');
+  const activeRoomIds = [];
+
   for (let i = 0; i < groups.length; i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, 800));
+    let roomCh = cloudRoomIds[i] ? guild.channels.cache.get(cloudRoomIds[i]) : null;
 
-    const roomName = `💨・ᴄᴏɴɴᴇᴄᴛɪᴏɴ・${i + 1}`;
-    let ch;
-    try {
-      ch = await guild.channels.create({
-        name: roomName,
-        type: ChannelType.GuildVoice,
-        parent: cfg.categoryId || null,
-        reason: `💨 High-Speed Connection round #${round}`,
-      });
-      newChannelIds.push(ch.id);
-    } catch (err) {
-      console.error(`[vc-shuffle] Could not create channel "${roomName}" in guild ${guildId}: ${err.message}`);
-      if (cfg.announcementChannelId) {
-        try {
-          const textCh = guild.channels.cache.get(cfg.announcementChannelId);
-          if (textCh) await textCh.send(`⚠️ Couldn't create **${roomName}** — ${err.message}. Make sure the bot has **Manage Channels** permission.`);
-        } catch { /* best effort */ }
-      }
-      continue;
-    }
-
-    // Apply role-level permission overwrites now that the channel exists.
-    // This uses ManageRoles if available; if the bot lacks it we skip silently —
-    // the channel will just be open to everyone which is fine for most servers.
-    if (permOverwrites.length > 0) {
+    if (!roomCh) {
+      // More groups than pre-created rooms — create an overflow room
       try {
-        await ch.permissionOverwrites.set(permOverwrites, `VC Speed Dating round #${round}`);
+        roomCh = await guild.channels.create({
+          name: `💨・ᴄʟᴏᴜᴅ・ʀᴏᴏᴍ・${i + 1}`,
+          type: ChannelType.GuildVoice,
+          parent: cfg.categoryId || null,
+          reason: `💨 HSC round #${round} overflow`,
+        });
+        if (!cfg.cloudRoomIds) cfg.cloudRoomIds = [];
+        cfg.cloudRoomIds.push(roomCh.id);
       } catch (err) {
-        console.warn(`[vc-shuffle] Could not set role overwrites on ${roomName} (bot may lack ManageRoles) — channel will be open: ${err.message}`);
+        console.error(`[vc-shuffle] Could not create overflow room ${i + 1}: ${err.message}`);
+        continue;
       }
     }
 
-    // Grant each assigned member a user-level Connect allow on this specific channel.
-    // This ensures they can be moved in even if they don't have the participant role
-    // or if @everyone is denied on the channel. We do this before the move so Discord
-    // accepts the voice.setChannel() call without a Missing Permissions error.
+    activeRoomIds.push(roomCh.id);
+
+    // Grant each assigned member user-level Connect on this room before moving
     for (const member of groups[i]) {
-      try {
-        await ch.permissionOverwrites.edit(member, {
-          ViewChannel: true,
-          Connect: true,
-          Speak: true,
-        }, { reason: `VC Speed Dating: assigning ${member.displayName} to round #${round}` });
-      } catch (err) {
-        console.error(`[vc-shuffle] Could not set connect perm for ${member.id} on ${roomName}:`, err.message);
-        // Don't abort — try the move anyway; they may have Connect via another role
-      }
+      await roomCh.permissionOverwrites.edit(member, { ViewChannel: true, Connect: true, Speak: true })
+        .catch((err) => console.warn(`[vc-shuffle] Perm edit failed for ${member.id}: ${err.message}`));
     }
 
+    // Move directly — no lobby bounce
     for (const member of groups[i]) {
-      try {
-        await member.voice.setChannel(ch, `💨 High-Speed Connection round #${round}`);
-      } catch (err) {
-        console.error(`[vc-shuffle] Could not move member ${member.id} to ${roomName}:`, err.message);
-      }
+      await member.voice.setChannel(roomCh, `💨 HSC round #${round}`)
+        .catch((err) => console.error(`[vc-shuffle] Could not move ${member.id}: ${err.message}`));
     }
   }
 
-  cfg.createdChannelIds = newChannelIds;
+  // Move anyone left in unused cloud rooms back to lobby
+  const lobby = guild.channels.cache.get(cfg.lobbyChannelIds[0]);
+  for (let i = groups.length; i < cloudRoomIds.length; i++) {
+    const roomCh = guild.channels.cache.get(cloudRoomIds[i]);
+    if (!roomCh) continue;
+    for (const member of roomCh.members.values()) {
+      if (member.user.bot) continue;
+      if (lobby) await member.voice.setChannel(lobby, '💨 Moved to lobby — room unused this round').catch(() => {});
+    }
+  }
+
+  cfg.createdChannelIds = activeRoomIds; // keep for solo rescue listener
   saveVcShuffleConfig(vcShuffleConfig);
 
-  // Step 7: post round matchups — prefer dedicated matchups channel, fall back to announcementChannelId
-  const matchupTarget = cfg.matchupsChannelId || cfg.announcementChannelId;
-  if (matchupTarget) {
+  // Post matchups with clickable @mentions
+  if (matchupCh) {
     try {
-      const textCh = guild.channels.cache.get(matchupTarget);
-      if (textCh) {
-        const groupLines = groups.map((g, i) => `**💨・ᴄᴏɴɴᴇᴄᴛɪᴏɴ・${i + 1}:** ${g.map((m) => m.displayName).join(' ↔ ')}`).join('\n');
-        const embed = new EmbedBuilder()
-          .setColor(0x8a2be2)
-          .setTitle(`💨 High-Speed Connection — Round #${round} Matchups`)
-          .setDescription(`${pool.length} member(s) paired across ${groups.length} connection(s)!\n\n${groupLines}`)
-          .setFooter({ text: `Round ends in ~${cfg.minIntervalMinutes} minute(s) · 📹 If your cam dropped, toggle it off and back on!` })
-          .setTimestamp();
-        await textCh.send({ embeds: [embed] });
-      }
+      const groupLines = groups.map((g, i) => {
+        const names = g.map((m) => `<@${m.id}>`).join(' ↔ ');
+        return `💨・ᴄʟᴏᴜᴅ・ʀᴏᴏᴍ・${i + 1} — ${names}${g.length > 2 ? ' *(trio)*' : ''}`;
+      }).join('\n');
+
+      const allMet = pool.length > 1 && state.pairHistory.size >= (pool.length * (pool.length - 1)) / 2;
+
+      const embed = new EmbedBuilder()
+        .setColor(0x8a2be2)
+        .setTitle(`💨 Round #${round} Matchups`)
+        .setDescription(`**${pool.length}** people · **${groups.length}** room${groups.length !== 1 ? 's' : ''}\n\n${groupLines}${allMet ? '\n\n🎉 Everyone\'s met everyone — resetting pair history!' : ''}`)
+        .setFooter({ text: `~${cfg.minIntervalMinutes ?? 3} min per round · Toggle cam off/on if it dropped` })
+        .setTimestamp();
+      await matchupCh.send({ embeds: [embed] });
+      if (allMet) state.pairHistory = new Set();
     } catch (err) {
-      console.error(`[vc-shuffle] Could not post matchups in guild ${guildId}:`, err.message);
+      console.error(`[vc-shuffle] Could not post matchups: ${err.message}`);
     }
   }
 
-  // Update the staff panel to reflect the new round
   await refreshStaffPanel(guild, guildId);
 
-  // Step 8: schedule the wrap-up warning (warningSeconds before the bell)
+  // Schedule 30-second warning (auto-deletes)
   const roundMs = (cfg.minIntervalMinutes ?? 3) * 60 * 1000;
-  const warnMs = Math.max(0, roundMs - (cfg.warningSeconds ?? 30) * 1000);
+  const warnSecs = cfg.warningSeconds ?? 30;
+  const warnMs = Math.max(0, roundMs - warnSecs * 1000);
 
-  if (warnMs > 0 && cfg.announcementChannelId) {
-    const warningTimeoutId = setTimeout(async () => {
-      try {
-        const textCh = guild.channels.cache.get(cfg.announcementChannelId);
-        const secsLeft = cfg.warningSeconds ?? 30;
-        if (textCh) {
-          await textCh.send(`⏰ **${secsLeft} seconds left!** Start wrapping up your conversations — the bell rings soon.`);
-        }
-      } catch (err) {
-        console.error(`[vc-shuffle] Could not post warning in guild ${guildId}:`, err.message);
-      }
-    }, warnMs);
-    shuffleState.set(guildId, { ...shuffleState.get(guildId), warningTimeoutId });
-  }
+  const warningTimeoutId = warnMs > 0 ? setTimeout(async () => {
+    const warnCh = matchupTarget ? guild.channels.cache.get(matchupTarget) : null;
+    if (warnCh) {
+      const warnMsg = await warnCh.send(`⏰ **${warnSecs} seconds left!** Wrap it up — the bell rings soon! 🔔`).catch(() => null);
+      if (warnMsg) setTimeout(() => warnMsg.delete().catch(() => {}), Math.max(0, (warnSecs - 3) * 1000));
+    }
+  }, warnMs) : null;
 
-  console.log(`[vc-shuffle] Guild ${guildId}: round #${round} complete — ${pool.length} members in ${groups.length} rooms`);
+  const cur = shuffleState.get(guildId) || state;
+  cur.warningTimeoutId = warningTimeoutId;
+  shuffleState.set(guildId, cur);
+
+  console.log(`[vc-shuffle] Guild ${guildId}: round #${round} — ${pool.length} people in ${groups.length} rooms`);
 }
 
-// Build the staff panel embed + button row (called to create or refresh the panel)
+// Build the staff panel embed + button row
 function buildStaffPanelContent(guildId) {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   const state = shuffleState.get(guildId);
@@ -1895,34 +1857,33 @@ function buildStaffPanelContent(guildId) {
   const round = state?.roundNumber ?? 0;
   const pairs = state?.pairHistory?.size ?? 0;
   const nextAt = state?.nextShuffleAt ? `<t:${Math.floor(state.nextShuffleAt / 1000)}:R>` : '—';
-  const mode = cfg.minGroupSize === 1 ? '1-on-1' : `${cfg.minGroupSize}v${cfg.minGroupSize}`;
+  const mode = (cfg.minGroupSize ?? 1) === 1 ? '1-on-1' : `${cfg.minGroupSize}v${cfg.minGroupSize}`;
 
   const embed = new EmbedBuilder()
     .setColor(running ? 0x8a2be2 : 0x555555)
-    .setTitle('💨 High-Speed Connection — Staff Control Panel')
-    .setDescription('Live event controls. Buttons below affect the session immediately.')
+    .setTitle('💨 High-Speed Connection — Master Panel')
+    .setDescription('Live event controls. Use buttons below to manage the session.')
     .addFields(
-      { name: 'Status',            value: running ? '🟢 Running' : '🔴 Stopped', inline: true },
-      { name: 'Round',             value: String(round),                           inline: true },
-      { name: 'Mode',              value: mode,                                    inline: true },
-      { name: 'Round length',      value: `${cfg.minIntervalMinutes}m`,            inline: true },
-      { name: 'Next bell',         value: running ? nextAt : '—',                 inline: true },
-      { name: 'Unique pairs',      value: String(pairs),                           inline: true },
+      { name: 'Status',       value: running ? '🟢 Running' : '🔴 Stopped', inline: true },
+      { name: 'Round',        value: String(round),                          inline: true },
+      { name: 'Mode',         value: mode,                                   inline: true },
+      { name: 'Round length', value: `${cfg.minIntervalMinutes ?? 3}m`,      inline: true },
+      { name: 'Next bell',    value: running ? nextAt : '—',                inline: true },
+      { name: 'Unique pairs', value: String(pairs),                          inline: true },
     )
-    .setFooter({ text: 'Updates automatically each round · Staff only' })
+    .setFooter({ text: 'Auto-updates each round · 💨・ᴍᴀsᴛᴇʀ・ᴘᴀɴᴇʟ' })
     .setTimestamp();
 
-  const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('spdating:start').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(running),
-    new ButtonBuilder().setCustomId('spdating:bell').setLabel('🔔 Ring Bell').setStyle(ButtonStyle.Primary).setDisabled(!running),
+    new ButtonBuilder().setCustomId('spdating:bell').setLabel('🔔 Next Round').setStyle(ButtonStyle.Primary).setDisabled(!running),
     new ButtonBuilder().setCustomId('spdating:stop').setLabel('⏹️ End Session').setStyle(ButtonStyle.Danger).setDisabled(!running),
   );
 
   return { embeds: [embed], components: [row] };
 }
 
-// Send or update the staff panel message in the staffPanelChannelId
+// Send or update the staff panel message
 async function refreshStaffPanel(guild, guildId) {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   if (!cfg.staffPanelChannelId) return;
@@ -1935,41 +1896,40 @@ async function refreshStaffPanel(guild, guildId) {
         const msg = await ch.messages.fetch(cfg.staffPanelMessageId);
         await msg.edit(content);
         return;
-      } catch {
-        // message was deleted — fall through and post a new one
-      }
+      } catch { /* deleted — post fresh */ }
     }
     const msg = await ch.send(content);
     cfg.staffPanelMessageId = msg.id;
     saveVcShuffleConfig(vcShuffleConfig);
   } catch (err) {
-    console.error(`[vc-shuffle] Could not refresh staff panel in guild ${guildId}:`, err.message);
+    console.error(`[vc-shuffle] Could not refresh staff panel: ${err.message}`);
   }
 }
 
-// Post the bell message to the announcement channel (called just before a new round starts)
+// Post bell message (auto-deletes after 10s)
 async function postBellMessage(guild, guildId) {
   const cfg = ensureVcShuffleGuildConfig(guildId);
-  if (!cfg.announcementChannelId) return;
+  const target = cfg.matchupsChannelId || cfg.announcementChannelId;
+  if (!target) return;
   try {
-    const textCh = guild.channels.cache.get(cfg.announcementChannelId);
+    const textCh = guild.channels.cache.get(target);
     if (!textCh) return;
     const state = shuffleState.get(guildId);
     const bellMsg = BELL_MESSAGES[(state?.roundNumber ?? 0) % BELL_MESSAGES.length];
-    await textCh.send(bellMsg);
+    const msg = await textCh.send(bellMsg);
+    setTimeout(() => msg.delete().catch(() => {}), 10000);
   } catch (err) {
-    console.error(`[vc-shuffle] Could not post bell message in guild ${guildId}:`, err.message);
+    console.error(`[vc-shuffle] Could not post bell: ${err.message}`);
   }
 }
 
-// Pick a random next interval in ms between min and max configured minutes
+// Random interval ms between min and max configured minutes
 function randomIntervalMs(cfg) {
-  const min = (cfg.minIntervalMinutes ?? 5) * 60 * 1000;
-  const max = (cfg.maxIntervalMinutes ?? 10) * 60 * 1000;
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+  const min = (cfg.minIntervalMinutes ?? 3) * 60 * 1000;
+  const max = (cfg.maxIntervalMinutes ?? cfg.minIntervalMinutes ?? 3) * 60 * 1000;
+  return Math.max(min, Math.floor(Math.random() * (max - min + 1)) + min);
 }
 
-// Schedule the next shuffle round for a guild (self-rescheduling)
 function scheduleNextShuffle(guild, guildId) {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   if (!cfg.enabled) return;
@@ -2089,8 +2049,8 @@ client.once('clientReady', () => {
     if (!cfg.enabled) continue;
     const guild = client.guilds.cache.get(guildId);
     if (!guild) continue;
-    console.log(`[vc-dating] Resuming speed dating session for guild ${guildId} after restart`);
-    shuffleState.set(guildId, { roundNumber: 0, pairHistory: new Set() });
+    console.log(`[vc-shuffle] Resuming shuffle for guild ${guildId}`);
+    shuffleState.set(guildId, { roundNumber: 0 });
     scheduleNextShuffle(guild, guildId);
   }
 });
@@ -3378,61 +3338,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   }
 });
 
-// ── VC Speed Dating: mid-round solo rescue ──────────────────────────────────
-// If someone leaves their date room mid-round and their partner ends up alone,
-// move that lone person into the smallest other active date room immediately.
-client.on('voiceStateUpdate', async (oldState, newState) => {
-  const guildId = oldState.guild?.id;
-  if (!guildId) return;
-
-  const cfg = vcShuffleConfig[guildId];
-  if (!cfg?.enabled || !cfg.createdChannelIds?.length) return;
-
-  // Only care about someone LEAVING one of our temp date rooms
-  const leftChannelId = oldState.channelId;
-  if (!leftChannelId || !cfg.createdChannelIds.includes(leftChannelId)) return;
-
-  // Brief settle delay — Discord fires voiceStateUpdate before cache updates
-  await new Promise((r) => setTimeout(r, 800));
-
-  const guild = oldState.guild;
-  const leftChannel = guild.channels.cache.get(leftChannelId);
-  if (!leftChannel) return;
-
-  // Check if exactly 1 human remains in the room they left
-  const remaining = [...leftChannel.members.values()].filter((m) => !m.user.bot);
-  if (remaining.length !== 1) return;
-
-  const lonePerson = remaining[0];
-
-  // Find the smallest other active date room with at least 1 person in it
-  const otherRooms = cfg.createdChannelIds
-    .filter((id) => id !== leftChannelId)
-    .map((id) => guild.channels.cache.get(id))
-    .filter((ch) => ch && ch.members.filter((m) => !m.user.bot).size >= 1)
-    .sort((a, b) => a.members.filter((m) => !m.user.bot).size - b.members.filter((m) => !m.user.bot).size);
-
-  if (!otherRooms.length) return; // no other rooms to rescue into
-
-  const destination = otherRooms[0];
-
-  try {
-    await lonePerson.voice.setChannel(destination, '💨 Speed Dating: rescued from solo room');
-    console.log(`[vc-dating] Rescued ${lonePerson.displayName} from solo room into ${destination.name}`);
-
-    // Announce the rescue if there's an announcement channel
-    if (cfg.matchupsChannelId || cfg.announcementChannelId) {
-      const textChId = cfg.matchupsChannelId || cfg.announcementChannelId;
-      const textCh = guild.channels.cache.get(textChId);
-      if (textCh) {
-        await textCh.send(`🔄 **${lonePerson.displayName}** was left alone — moved them into **${destination.name}**!`);
-      }
-    }
-  } catch (err) {
-    console.error(`[vc-dating] Could not rescue ${lonePerson.displayName} from solo room:`, err.message);
-  }
-});
-
 // Prevent one bad interaction, network hiccup, or unexpected error from
 // crashing the whole bot process. It gets logged instead, and the bot stays online.
 client.on('error', (err) => {
@@ -4439,144 +4344,138 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
   const cfg = ensureVcShuffleGuildConfig(guildId);
   const { PermissionFlagsBits: PF } = require('discord.js');
 
-  // Helper: create a channel without overwrites, then apply them separately.
-  // Creating with permissionOverwrites requires ManageRoles; applying after only needs ManageChannels.
-  async function createThenOverwrite(options, overwrites, reason) {
-    const { permissionOverwrites: _ignored, ...rest } = options;
-    const ch = await guild.channels.create({ ...rest, reason });
-    if (overwrites && overwrites.length > 0) {
-      try {
-        await ch.permissionOverwrites.set(overwrites, reason);
-      } catch (err) {
-        console.warn(`[vc-shuffle] setup-channels: could not apply overwrites to ${ch.name} (bot may lack ManageRoles) — channel will use category defaults: ${err.message}`);
-      }
+  // Create channel first (no overwrites), then apply them after.
+  // This requires only ManageChannels for creation; ManageRoles only needed for the overwrite step.
+  async function createThenOverwrite(createOpts, overwrites, reason) {
+    const ch = await guild.channels.create({ ...createOpts, reason });
+    if (overwrites?.length) {
+      try { await ch.permissionOverwrites.set(overwrites, reason); }
+      catch (err) { console.warn(`[vc-shuffle] Could not apply overwrites to ${ch.name}: ${err.message}`); }
     }
     return ch;
   }
 
   try {
-    // Build staff role + bot role overwrite list for restricted channels
-    const staffAllow = [PF.ViewChannel, PF.SendMessages, PF.ReadMessageHistory, PF.ManageMessages];
-    const botAllow   = [PF.ViewChannel, PF.SendMessages, PF.ReadMessageHistory, PF.ManageMessages, PF.ManageChannels];
+    const PFB = PF;
+    const botId = client.user.id;
 
-    const baseOverwrites = [
-      { id: guild.id, deny: [PF.ViewChannel] }, // @everyone denied by default
-      { id: client.user.id, allow: [PF.ViewChannel, PF.SendMessages, PF.ReadMessageHistory, PF.ManageMessages, PF.ManageChannels] },
-      ...(cfg.staffRoleIds || []).map((id) => ({ id, allow: staffAllow })),
-      ...(cfg.botRoleId ? [{ id: cfg.botRoleId, allow: botAllow }] : []),
-    ];
+    const botOverwrite    = { id: botId,    allow: [PFB.ViewChannel, PFB.SendMessages, PFB.ReadMessageHistory, PFB.ManageMessages, PFB.ManageChannels, PFB.Connect, PFB.MoveMembers] };
+    const everyoneDeny    = { id: guild.id, deny:  [PFB.ViewChannel, PFB.Connect] };
+    const everyoneReadOnly= { id: guild.id, deny:  [PFB.SendMessages, PFB.CreatePublicThreads], allow: [PFB.ViewChannel, PFB.ReadMessageHistory] };
 
-    const memberReadOnly = [
-      { id: guild.id, deny: [PF.SendMessages, PF.CreatePublicThreads, PF.CreatePrivateThreads] },
-      { id: guild.id, allow: [PF.ViewChannel, PF.ReadMessageHistory] },
-      { id: client.user.id, allow: [PF.ViewChannel, PF.SendMessages, PF.ReadMessageHistory, PF.ManageMessages, PF.ManageChannels] },
-      ...(cfg.staffRoleIds || []).map((id) => ({ id, allow: [...staffAllow, PF.ManageMessages] })),
-      ...(cfg.botRoleId ? [{ id: cfg.botRoleId, allow: botAllow }] : []),
-    ];
+    const staffOverwrites = (cfg.staffRoleIds || []).map((id) => ({
+      id, allow: [PFB.ViewChannel, PFB.SendMessages, PFB.ReadMessageHistory, PFB.ManageMessages, PFB.Connect, PFB.Speak, PFB.MoveMembers],
+    }));
+    const participantVC   = cfg.participantRoleId
+      ? [{ id: cfg.participantRoleId, allow: [PFB.ViewChannel, PFB.Connect, PFB.Speak, PFB.UseVAD, PFB.Stream] }]
+      : [];
+    const participantRead = cfg.participantRoleId
+      ? [{ id: cfg.participantRoleId, allow: [PFB.ViewChannel, PFB.ReadMessageHistory] }]
+      : [];
 
-    // 1. Create or reuse the event category
+    // ── 1. Category ──────────────────────────────────────────────────────────
     let category = cfg.eventCategoryId ? guild.channels.cache.get(cfg.eventCategoryId) : null;
     if (!category) {
       category = await createThenOverwrite(
-        { name: '💨・ʜɪɢʜ-ꜱᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ', type: ChannelType.GuildCategory },
-        [
-          { id: guild.id, deny: [PF.ViewChannel] },
-          { id: client.user.id, allow: [PF.ViewChannel, PF.ManageChannels, PF.ManageRoles] },
-        ],
-        '💨 High-Speed Connection event setup'
+        { name: '💨・ʜɪɢʜ-sᴘᴇᴇᴅ・ᴄᴏɴɴᴇᴄᴛɪᴏɴ', type: ChannelType.GuildCategory },
+        [everyoneDeny, botOverwrite, ...staffOverwrites],
+        '💨 High-Speed Connection: first-time setup'
       );
       cfg.eventCategoryId = category.id;
-      if (!cfg.categoryId) cfg.categoryId = category.id;
+      cfg.categoryId = category.id;
     }
 
-    // 2. Create #matchups channel (member-readable, shows round pairings + session summary)
-    let matchupsCh = cfg.matchupsChannelId ? guild.channels.cache.get(cfg.matchupsChannelId) : null;
-    if (!matchupsCh) {
-      matchupsCh = await createThenOverwrite(
-        { name: '💨・ᴍᴀᴛᴄʜ-ᴜᴘꜱ', type: ChannelType.GuildText, parent: category.id },
-        [
-          ...memberReadOnly,
-          ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.ReadMessageHistory] }] : []),
-        ],
-        '💨 High-Speed Connection: matchups channel'
-      );
-      cfg.matchupsChannelId = matchupsCh.id;
-    }
-
-    // 3. Create #high-speed-connection-info (member-facing read-only event info)
+    // ── 2. 💨・ɪɴꜰᴏ (member-read-only how-it-works) ─────────────────────────
     let infoCh = cfg.infoChannelId ? guild.channels.cache.get(cfg.infoChannelId) : null;
     if (!infoCh) {
       infoCh = await createThenOverwrite(
         { name: '💨・ɪɴꜰᴏ', type: ChannelType.GuildText, parent: category.id },
-        [
-          ...memberReadOnly,
-          ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.ReadMessageHistory] }] : []),
-        ],
+        [everyoneReadOnly, botOverwrite, ...staffOverwrites, ...participantRead],
         '💨 High-Speed Connection: info channel'
       );
       cfg.infoChannelId = infoCh.id;
     }
 
-    // 4. Create #high-speed-connection-control (staff-only panel)
+    // ── 3. 💨・ᴍᴀᴛᴄʜ-ᴜᴘs (round pairings, member-readable) ─────────────────
+    let matchupsCh = cfg.matchupsChannelId ? guild.channels.cache.get(cfg.matchupsChannelId) : null;
+    if (!matchupsCh) {
+      matchupsCh = await createThenOverwrite(
+        { name: '💨・ᴍᴀᴛᴄʜ-ᴜᴘs', type: ChannelType.GuildText, parent: category.id },
+        [everyoneReadOnly, botOverwrite, ...staffOverwrites, ...participantRead],
+        '💨 High-Speed Connection: matchups channel'
+      );
+      cfg.matchupsChannelId = matchupsCh.id;
+      cfg.announcementChannelId = matchupsCh.id;
+    }
+
+    // ── 4. 💨・ᴍᴀsᴛᴇʀ・ᴘᴀɴᴇʟ (staff-only control channel) ─────────────────
     let panelCh = cfg.staffPanelChannelId ? guild.channels.cache.get(cfg.staffPanelChannelId) : null;
     if (!panelCh) {
       panelCh = await createThenOverwrite(
-        { name: '💨・ꜱᴛᴀꜰꜰ・ᴘᴀɴᴇʟ', type: ChannelType.GuildText, parent: category.id },
-        baseOverwrites,
-        '💨 High-Speed Connection: staff control panel'
+        { name: '💨・ᴍᴀsᴛᴇʀ・ᴘᴀɴᴇʟ', type: ChannelType.GuildText, parent: category.id },
+        [everyoneDeny, botOverwrite, ...staffOverwrites],
+        '💨 High-Speed Connection: staff master panel'
       );
       cfg.staffPanelChannelId = panelCh.id;
     }
 
-    // 5. Create lobby voice channel if none configured yet
-    if (!cfg.lobbyChannelIds.length) {
-      const lobbyCh = await createThenOverwrite(
-        { name: '💨・ʟᴏʙʙʏ', type: ChannelType.GuildVoice, parent: category.id },
-        [
-          { id: guild.id, deny: [PF.ViewChannel, PF.Connect] },
-          { id: client.user.id, allow: [PF.ViewChannel, PF.Connect, PF.MoveMembers, PF.ManageChannels] },
-          ...(cfg.participantRoleId ? [{ id: cfg.participantRoleId, allow: [PF.ViewChannel, PF.Connect, PF.Speak, PF.UseVAD, PF.Stream] }] : []),
-          ...(cfg.staffRoleIds || []).map((id) => ({ id, allow: [PF.ViewChannel, PF.Connect, PF.Speak, PF.MoveMembers] })),
-          ...(cfg.botRoleId ? [{ id: cfg.botRoleId, allow: [PF.ViewChannel, PF.Connect, PF.MoveMembers, PF.ManageChannels] }] : []),
-        ],
-        '💨 High-Speed Connection: lobby voice channel'
+    // ── 5. 💨・ᴄᴏɴɴᴇᴄᴛɪᴏɴ・ʟᴏʙʙʏ (VC lobby) ──────────────────────────────
+    let lobbyCh = cfg.lobbyChannelIds?.[0] ? guild.channels.cache.get(cfg.lobbyChannelIds[0]) : null;
+    if (!lobbyCh) {
+      lobbyCh = await createThenOverwrite(
+        { name: '💨・ᴄᴏɴɴᴇᴄᴛɪᴏɴ・ʟᴏʙʙʏ', type: ChannelType.GuildVoice, parent: category.id },
+        [everyoneDeny, botOverwrite, ...staffOverwrites, ...participantVC],
+        '💨 High-Speed Connection: lobby'
       );
       cfg.lobbyChannelIds = [lobbyCh.id];
     }
 
+    // ── 6. Pre-create cloud rooms (persistent — never deleted between rounds) ─
+    // We create up to 8 rooms now and reuse them each round via direct swap.
+    const CLOUD_ROOM_COUNT = 8;
+    if (!cfg.cloudRoomIds) cfg.cloudRoomIds = [];
+    for (let i = cfg.cloudRoomIds.length; i < CLOUD_ROOM_COUNT; i++) {
+      await new Promise((r) => setTimeout(r, 800)); // rate limit buffer
+      const num = i + 1;
+      const room = await createThenOverwrite(
+        { name: `💨・ᴄʟᴏᴜᴅ・ʀᴏᴏᴍ・${num}`, type: ChannelType.GuildVoice, parent: category.id },
+        // Rooms start hidden/locked — bot manages access per round
+        [everyoneDeny, botOverwrite, ...staffOverwrites],
+        `💨 High-Speed Connection: cloud room ${num}`
+      );
+      cfg.cloudRoomIds.push(room.id);
+    }
+
     saveVcShuffleConfig(vcShuffleConfig);
 
-    // 6. Post the member-facing info embed in #high-speed-connection-info
+    // ── 7. Post how-it-works embed in 💨・ɪɴꜰᴏ ────────────────────────────
     try {
-      const existingMessages = await infoCh.messages.fetch({ limit: 5 });
-      const botMessages = existingMessages.filter((m) => m.author.id === guild.members.me?.id);
-      if (botMessages.size === 0) {
+      const existing = await infoCh.messages.fetch({ limit: 5 });
+      if (!existing.some((m) => m.author.id === botId)) {
         const infoEmbed = new EmbedBuilder()
           .setColor(0x8a2be2)
           .setTitle('💨 High-Speed Connection — How It Works')
           .setDescription(
-            `Welcome to 💨 High-Speed Connection! Here's what to expect:\n\n` +
-            `**1. Join the lobby**\nHop into the 💨 High-Speed Connection Lobby voice channel. You'll be automatically entered into the next round.\n\n` +
-            `**2. Get paired**\nWhen the round starts, the bot moves you into a private voice channel with your match(es). Say hi!\n\n` +
-            `**3. The bell rings**\nYou'll get a 30-second warning before the round ends, then the bell rings and everyone rotates to someone new.\n\n` +
-            `**4. No repeats**\nThe bot tracks who you've already talked to and avoids pairing you with the same person twice.\n\n` +
-            `**5. Camera dropped?**\nIf your camera turns off after being moved, just toggle it off and back on — it's a Discord thing, not you.\n\n` +
-            `**6. Matchups**\nEach round's pairings are posted in <#${matchupsCh.id}> so you can look up who you met.`
+            `Welcome to **💨 High-Speed Connection** — speed dating, VC style!\n\n` +
+            `**1. 🚪 Join the lobby**\nHop into <#${lobbyCh.id}>. You're automatically in the pool for the next round.\n\n` +
+            `**2. 💘 Get matched**\nWhen the round starts you'll be moved directly into a private cloud room with your match. Say hi!\n\n` +
+            `**3. 🔔 The bell rings**\nYou'll get a 30-second heads-up before the round ends, then everyone swaps rooms to meet someone new.\n\n` +
+            `**4. 🚫 No repeats**\nThe bot remembers who you've already talked to and avoids rematching you until you've met everyone.\n\n` +
+            `**5. 👥 Odd numbers**\nIf there's an odd person out, they join the smallest group as a trio instead of being left alone.\n\n` +
+            `**6. 📋 Matchups**\nEach round's pairings are posted in <#${matchupsCh.id}> — click names to view profiles!`
           )
-          .setFooter({ text: 'Pairings are posted each round in #high-speed-connection-matchups' })
+          .setFooter({ text: '💨 High-Speed Connection · Managed by G33KY Bot' })
           .setTimestamp();
         await infoCh.send({ embeds: [infoEmbed] });
       }
-    } catch (err) {
-      console.error(`[vc-shuffle] Could not post info embed:`, err.message);
-    }
+    } catch (err) { console.error(`[vc-shuffle] Could not post info embed:`, err.message); }
 
-    // 7. Post (or refresh) the staff control panel
-    cfg.staffPanelMessageId = null; // force a fresh post after channel creation
+    // ── 8. Post staff master panel ────────────────────────────────────────
+    cfg.staffPanelMessageId = null; // force fresh post
     saveVcShuffleConfig(vcShuffleConfig);
     await refreshStaffPanel(guild, guildId);
 
-    res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Event channels created! Check #high-speed-connection-control for the staff panel.')}`);
+    res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('✅ All channels created! Check 💨・ᴍᴀsᴛᴇʀ・ᴘᴀɴᴇʟ for the live control panel.')}`);
   } catch (err) {
     console.error('[vc-shuffle] setup-channels error:', err);
     res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Setup failed — ' + err.message)}`);
