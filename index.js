@@ -1449,6 +1449,9 @@ function ensureVcShuffleGuildConfig(guildId) {
   if (vcShuffleConfig[guildId].staffPanelChannelId === undefined) vcShuffleConfig[guildId].staffPanelChannelId = null;
   if (vcShuffleConfig[guildId].infoChannelId === undefined) vcShuffleConfig[guildId].infoChannelId = null;
   if (vcShuffleConfig[guildId].staffPanelMessageId === undefined) vcShuffleConfig[guildId].staffPanelMessageId = null;
+  // Deduplicate cloudRoomIds on every access — prevents duplicate rooms from double setup runs
+  if (!vcShuffleConfig[guildId].cloudRoomIds) vcShuffleConfig[guildId].cloudRoomIds = [];
+  vcShuffleConfig[guildId].cloudRoomIds = [...new Set(vcShuffleConfig[guildId].cloudRoomIds)];
   return vcShuffleConfig[guildId];
 }
 
@@ -4431,19 +4434,39 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
     }
 
     // ── 6. Pre-create cloud rooms (persistent — never deleted between rounds) ─
-    // We create up to 8 rooms now and reuse them each round via direct swap.
     const CLOUD_ROOM_COUNT = 8;
     if (!cfg.cloudRoomIds) cfg.cloudRoomIds = [];
+
+    // Deduplicate and prune any IDs that no longer exist in Discord
+    cfg.cloudRoomIds = [...new Set(cfg.cloudRoomIds)].filter((id) => guild.channels.cache.has(id));
+
+    // Index existing cloud room names in this category so we don't duplicate
+    const existingCloudNames = new Map(); // name -> channelId
+    for (const [id, ch] of guild.channels.cache) {
+      if (ch.parentId === category.id && ch.type === ChannelType.GuildVoice) {
+        existingCloudNames.set(ch.name, id);
+      }
+    }
+
     for (let i = cfg.cloudRoomIds.length; i < CLOUD_ROOM_COUNT; i++) {
-      await new Promise((r) => setTimeout(r, 800)); // rate limit buffer
       const num = i + 1;
+      const roomName = `💨・ᴄʟᴏᴜᴅ・ʀᴏᴏᴍ・${num}`;
+
+      // If a channel with this exact name already exists in the category, reuse it
+      if (existingCloudNames.has(roomName)) {
+        const existingId = existingCloudNames.get(roomName);
+        if (!cfg.cloudRoomIds.includes(existingId)) cfg.cloudRoomIds.push(existingId);
+        continue;
+      }
+
+      await new Promise((r) => setTimeout(r, 800));
       const room = await createThenOverwrite(
-        { name: `💨・ᴄʟᴏᴜᴅ・ʀᴏᴏᴍ・${num}`, type: ChannelType.GuildVoice, parent: category.id },
-        // Rooms start hidden/locked — bot manages access per round
+        { name: roomName, type: ChannelType.GuildVoice, parent: category.id },
         [everyoneDeny, botOverwrite, ...staffOverwrites],
         `💨 High-Speed Connection: cloud room ${num}`
       );
       cfg.cloudRoomIds.push(room.id);
+      existingCloudNames.set(roomName, room.id); // prevent double-create in same run
     }
 
     saveVcShuffleConfig(vcShuffleConfig);
