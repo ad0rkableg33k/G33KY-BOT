@@ -8,13 +8,13 @@
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      --magenta: #d400ff;
+      --magenta: #ff0090;
       --magenta-dim: #a000cc;
-      --magenta-glow: rgba(212, 0, 255, 0.35);
-      --magenta-faint: rgba(212, 0, 255, 0.08);
+      --magenta-glow: rgba(255, 0, 144, 0.35);
+      --magenta-faint: rgba(255, 0, 144, 0.08);
       --bg: #080808;
       --surface: #111;
-      --border: rgba(212, 0, 255, 0.2);
+      --border: rgba(255, 0, 144, 0.2);
       --text: #e0e0e0;
       --muted: #888;
     }
@@ -116,7 +116,7 @@
       top: 50%; left: 50%;
       transform: translate(-50%, -60%);
       width: 600px; height: 600px;
-      background: radial-gradient(ellipse, rgba(212,0,255,0.12) 0%, transparent 70%);
+      background: radial-gradient(ellipse, rgba(255,0,144,0.12) 0%, transparent 70%);
       pointer-events: none;
     }
 
@@ -138,8 +138,8 @@
       color: var(--magenta);
       text-shadow:
         0 0 20px var(--magenta-glow),
-        0 0 60px rgba(212, 0, 255, 0.2),
-        0 0 120px rgba(212, 0, 255, 0.1);
+        0 0 60px rgba(255, 0, 144, 0.2),
+        0 0 120px rgba(255, 0, 144, 0.1);
       margin-bottom: 0.2em;
     }
 
@@ -147,7 +147,7 @@
       display: block;
       font-size: clamp(2.5rem, 8vw, 6rem);
       color: #fff;
-      text-shadow: 0 0 40px rgba(212, 0, 255, 0.3);
+      text-shadow: 0 0 40px rgba(255, 0, 144, 0.3);
       letter-spacing: 0.12em;
     }
 
@@ -188,8 +188,8 @@
     }
 
     .btn-primary:hover {
-      background: #ff33ff;
-      box-shadow: 0 0 35px rgba(212, 0, 255, 0.6);
+      background: #ff33aa;
+      box-shadow: 0 0 35px rgba(255, 0, 144, 0.6);
       transform: translateY(-1px);
     }
 
@@ -426,7 +426,7 @@
       all configurable per-server, no code edits needed.
     </p>
     <div class="cta-row">
-      <a href="https://discord.com/oauth2/authorize?client_id=1533481401922355210&permissions=137456045136&scope=bot%20applications.commands" class="btn btn-primary">
+      <a href="https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=8&scope=bot%20applications.commands" class="btn btn-primary">
         ⚡ Add to Server
       </a>
       <a href="https://github.com/ad0rkableg33k/G33KY-BOT" class="btn btn-ghost">
