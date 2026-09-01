@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — High-Speed Connection Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --magenta: #d400ff;
+      --magenta-glow: rgba(212, 0, 255, 0.35);
+      --magenta-faint: rgba(212, 0, 255, 0.08);
+      --bg: #080808;
+      --border: rgba(212, 0, 255, 0.2);
+      --text: #e0e0e0;
+      --muted: #888;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      overflow-x: hidden;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.06) 2px, rgba(0,0,0,0.06) 4px);
+      pointer-events: none;
+      z-index: 999;
+    }
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1rem 2rem;
+      background: rgba(8,8,8,0.85);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.4rem;
+      letter-spacing: 0.1em;
+      color: var(--magenta);
+      text-shadow: 0 0 12px var(--magenta-glow);
+      text-decoration: none;
+    }
+    .nav-links { display: flex; gap: 2rem; list-style: none; }
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover { color: var(--magenta); }
+    .page-wrap {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 8rem 2rem 5rem;
+    }
+    .doc-eyebrow {
+      font-size: 0.7rem;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: var(--magenta);
+      opacity: 0.7;
+      margin-bottom: 0.75rem;
+    }
+    .doc-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(3rem, 8vw, 5rem);
+      letter-spacing: 0.06em;
+      color: #fff;
+      text-shadow: 0 0 40px rgba(212,0,255,0.2);
+      line-height: 1;
+      margin-bottom: 0.5rem;
+    }
+    .doc-meta {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-bottom: 3rem;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .doc-section { margin-bottom: 2.5rem; }
+    .doc-section h2 {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.6rem;
+      letter-spacing: 0.08em;
+      color: var(--magenta);
+      margin-bottom: 0.75rem;
+    }
+    .doc-section p {
+      color: var(--muted);
+      margin-bottom: 0.75rem;
+      font-size: 0.95rem;
+    }
+    .doc-section ul {
+      list-style: none;
+      padding-left: 0;
+      margin-bottom: 0.75rem;
+    }
+    .doc-section ul li {
+      color: var(--muted);
+      font-size: 0.95rem;
+      padding: 0.2rem 0 0.2rem 1.2rem;
+      position: relative;
+    }
+    .doc-section ul li::before {
+      content: '—';
+      position: absolute;
+      left: 0;
+      color: var(--magenta);
+      opacity: 0.5;
+    }
+    .doc-section strong { color: var(--text); font-weight: 600; }
+    a { color: var(--magenta); }
+    code {
+      font-family: 'Courier New', monospace;
+      background: var(--magenta-faint);
+      border: 1px solid var(--border);
+      padding: 0.1em 0.4em;
+      border-radius: 3px;
+      font-size: 0.85em;
+      color: var(--magenta);
+    }
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+      max-width: 780px;
+      margin: 2rem auto 0;
+    }
+    .footer-brand {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.1rem;
+      letter-spacing: 0.1em;
+      color: var(--magenta);
+      opacity: 0.6;
+    }
+    .footer-links { display: flex; gap: 1.5rem; list-style: none; }
+    .footer-links a { color: var(--muted); text-decoration: none; font-size: 0.8rem; transition: color 0.2s; }
+    .footer-links a:hover { color: var(--magenta); }
+    @media (max-width: 600px) { .nav-links { display: none; } }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <a class="nav-logo" href="index.html">HSC Bot</a>
+    <ul class="nav-links">
+      <li><a href="index.html#features">Features</a></li>
+      <li><a href="index.html#commands">Commands</a></li>
+      <li><a href="index.html#setup">Setup</a></li>
+      <li><a href="tos.html">Terms</a></li>
+      <li><a href="privacy.html">Privacy</a></li>
+    </ul>
+  </nav>
+
+  <div class="page-wrap">
+    <p class="doc-eyebrow">Legal</p>
+    <h1 class="doc-title">Privacy Policy</h1>
+    <p class="doc-meta">
+      <strong>Effective Date:</strong> August 8, 2026 &nbsp;·&nbsp; <strong>Last Updated:</strong> August 8, 2026
+    </p>
+
+    <p style="color:var(--muted);font-size:0.95rem;margin-bottom:2.5rem;">
+      This Privacy Policy explains how <strong style="color:var(--text)">High-Speed Connection Bot</strong> ("HSC Bot," "we," "us," or "our") — also known as G33KY Bot — collects, uses, stores, and protects information when the Bot is used in a Discord server.
+    </p>
+
+    <div class="doc-section">
+      <h2>1. Information We Collect</h2>
+      <p>The Bot collects only information reasonably necessary to provide its configured features. Depending on which features a server administrator enables, this may include:</p>
+
+      <p><strong>Discord Account Information</strong></p>
+      <ul>
+        <li>Discord user ID</li>
+        <li>Discord server/guild ID</li>
+        <li>Server membership information</li>
+        <li>Discord roles</li>
+        <li>Username or display information when required for a command</li>
+        <li>Server join information where required for activity calculations</li>
+      </ul>
+
+      <p><strong>Activity Information</strong> (when Activity Tracking is enabled)</p>
+      <ul>
+        <li>Discord user ID</li>
+        <li>Server ID</li>
+        <li>Time of the member's most recent qualifying message activity</li>
+        <li>Time of the member's most recent qualifying voice activity</li>
+      </ul>
+      <p>These activity records are stored in <code>activity-data.json</code>.</p>
+
+      <p><strong>Voice Activity</strong> — the Bot may detect when a member joins, leaves, or changes voice channels, or remains in voice long enough to satisfy the configured activity threshold. For Activity Tracking, the Bot records the resulting qualifying activity timestamp rather than maintaining a permanent record of every voice session.</p>
+
+      <p><strong>Message Activity</strong> — when Activity Tracking is enabled, the Bot observes server messages to determine whether a member has participated. It records the <strong>time of the member's latest qualifying message</strong>, not the message content.</p>
+
+      <p><strong>Camera Status</strong> — when the Camera Policy is enabled, the Bot receives relevant Discord voice-state information to determine whether a member's camera is enabled. The Bot does not record or store the member's actual camera video.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>2. Information We Do Not Intentionally Collect</h2>
+      <p>The Bot does not intentionally collect or store:</p>
+      <ul>
+        <li>Camera recordings, microphone recordings, or audio recordings</li>
+        <li>Copies of members' message content for Activity Tracking</li>
+        <li>Private messages for Activity Tracking</li>
+        <li>Passwords or Discord account credentials</li>
+        <li>Payment card information</li>
+      </ul>
+      <p>The Activity Tracker is designed around activity timestamps rather than storing a complete message history.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>3. How We Use Information</h2>
+      <p>Information collected by the Bot is used to:</p>
+      <ul>
+        <li>Determine member activity status and assign Active or Inactive roles</li>
+        <li>Determine whether camera requirements are satisfied</li>
+        <li>Send camera reminders and remove members from monitored voice channels when configured</li>
+        <li>Process member reactivation</li>
+        <li>Provide administrator commands</li>
+        <li>Maintain server-specific configuration</li>
+        <li>Diagnose technical problems and maintain the Bot</li>
+      </ul>
+    </div>
+
+    <div class="doc-section">
+      <h2>4. Server-Specific Configuration</h2>
+      <p>The Bot stores configuration separately for each Discord server, keyed by server ID.</p>
+      <p><strong>Camera configuration</strong> may include: whether the camera policy is enabled, monitored voice channels, exempt roles, grace-period and warning-period settings, and the policy announcement link.</p>
+      <p><strong>Activity configuration</strong> may include: enabled/disabled status, active role, inactive role, activity threshold, reactivation/quarantine channel, exempt roles, and whether channel-permission restrictions have been applied for the Inactive role.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>5. Data Storage</h2>
+      <p>The Bot currently stores configuration and activity information in local application data files, which may include:</p>
+      <ul>
+        <li><code>camera-config.json</code></li>
+        <li><code>activity-config.json</code></li>
+        <li><code>activity-data.json</code></li>
+        <li><code>channels.json</code></li>
+        <li><code>descriptions.json</code></li>
+      </ul>
+      <p>The location of these files depends on the hosting environment. If the Bot is hosted using a third-party provider, that provider may have access to the infrastructure on which the Bot operates, subject to that provider's own policies.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>6. Discord and Third-Party Services</h2>
+      <p>The Bot relies on Discord's API and infrastructure. Information transmitted through Discord is also subject to Discord's own policies. The Bot may also rely on third-party hosting or infrastructure providers, who may process information as necessary to provide hosting, networking, storage, monitoring, or other infrastructure services.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>7. Data Retention</h2>
+      <p>The Bot's Activity Tracker uses a rolling activity window, which defaults to <strong>30 days</strong> but may be changed by the server administrator.</p>
+      <p>A member's stored activity timestamps (<code>lastMessageAt</code> and <code>lastVoiceActiveAt</code>) are permanently deleted after <strong>90 days</strong> by default, unless the server administrator has configured a different retention period. Retention cannot be configured shorter than the server's activity window.</p>
+      <p>This cleanup runs automatically on a recurring schedule. Server administrators can also trigger the cleanup manually, using the Bot's administrator commands.</p>
+      <p>Deleting a stored record does not, by itself, change a member's current Active or Inactive role — a record old enough to be deleted has already aged past the activity window and would already reflect Inactive status.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>8. Data Security</h2>
+      <p>We take reasonable measures designed to protect information processed by the Bot. However, no electronic storage or transmission system can be guaranteed to be completely secure. You acknowledge that use of Internet-based services carries inherent security risks.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>9. Server Administrators</h2>
+      <p>The administrator of a Discord server decides whether to enable the Bot's features and determines how those features are configured. Members with questions about why the Bot is being used in a particular server should first contact that server's administrators.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>10. Your Privacy Choices</h2>
+      <p>Depending on applicable law, you may have rights regarding personal information, including rights to:</p>
+      <ul>
+        <li>Request access to information associated with you</li>
+        <li>Request correction of inaccurate information</li>
+        <li>Request deletion of information</li>
+        <li>Object to or restrict certain processing</li>
+        <li>Request additional information about how your information is processed</li>
+      </ul>
+      <p>Because the Bot operates within Discord servers controlled by independent administrators, some requests may need to be directed to the relevant server administrator. Requests concerning the Bot's own processing may be sent to: <a href="mailto:dragon.exe@atomicmail.io">dragon.exe@atomicmail.io</a></p>
+    </div>
+
+    <div class="doc-section">
+      <h2>11. Children's Privacy</h2>
+      <p>The Bot is not specifically directed toward children. You must comply with Discord's age requirements and applicable laws when using Discord and the Bot. If we become aware that we have collected personal information in violation of applicable law, we will take reasonable steps to address the situation.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>12. Changes to This Privacy Policy</h2>
+      <p>We may update this Privacy Policy when our practices, features, or legal obligations change. The current version will be available at this URL.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>13. Contact</h2>
+      <p>Privacy questions or requests may be sent to: <a href="mailto:dragon.exe@atomicmail.io">dragon.exe@atomicmail.io</a></p>
+    </div>
+  </div>
+
+  <footer>
+    <div class="footer-brand">HIGH-SPEED CONNECTION BOT</div>
+    <ul class="footer-links">
+      <li><a href="index.html">Home</a></li>
+      <li><a href="tos.html">Terms</a></li>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="mailto:dragon.exe@atomicmail.io">Contact</a></li>
+    </ul>
+  </footer>
+
+</body>
+</html>

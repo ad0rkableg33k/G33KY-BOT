@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Terms of Service — High-Speed Connection Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --magenta: #d400ff;
+      --magenta-glow: rgba(212, 0, 255, 0.35);
+      --magenta-faint: rgba(212, 0, 255, 0.08);
+      --bg: #080808;
+      --border: rgba(212, 0, 255, 0.2);
+      --text: #e0e0e0;
+      --muted: #888;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      overflow-x: hidden;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.06) 2px, rgba(0,0,0,0.06) 4px);
+      pointer-events: none;
+      z-index: 999;
+    }
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1rem 2rem;
+      background: rgba(8,8,8,0.85);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.4rem;
+      letter-spacing: 0.1em;
+      color: var(--magenta);
+      text-shadow: 0 0 12px var(--magenta-glow);
+      text-decoration: none;
+    }
+    .nav-links { display: flex; gap: 2rem; list-style: none; }
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover { color: var(--magenta); }
+    .page-wrap {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 8rem 2rem 5rem;
+    }
+    .doc-eyebrow {
+      font-size: 0.7rem;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: var(--magenta);
+      opacity: 0.7;
+      margin-bottom: 0.75rem;
+    }
+    .doc-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(3rem, 8vw, 5rem);
+      letter-spacing: 0.06em;
+      color: #fff;
+      text-shadow: 0 0 40px rgba(212,0,255,0.2);
+      line-height: 1;
+      margin-bottom: 0.5rem;
+    }
+    .doc-meta {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-bottom: 3rem;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .doc-section {
+      margin-bottom: 2.5rem;
+    }
+    .doc-section h2 {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.6rem;
+      letter-spacing: 0.08em;
+      color: var(--magenta);
+      margin-bottom: 0.75rem;
+    }
+    .doc-section p {
+      color: var(--muted);
+      margin-bottom: 0.75rem;
+      font-size: 0.95rem;
+    }
+    .doc-section ul {
+      list-style: none;
+      padding-left: 0;
+      margin-bottom: 0.75rem;
+    }
+    .doc-section ul li {
+      color: var(--muted);
+      font-size: 0.95rem;
+      padding: 0.2rem 0 0.2rem 1.2rem;
+      position: relative;
+    }
+    .doc-section ul li::before {
+      content: '—';
+      position: absolute;
+      left: 0;
+      color: var(--magenta);
+      opacity: 0.5;
+    }
+    .doc-section strong { color: var(--text); font-weight: 600; }
+    a { color: var(--magenta); }
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+      max-width: 780px;
+      margin: 2rem auto 0;
+    }
+    .footer-brand {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.1rem;
+      letter-spacing: 0.1em;
+      color: var(--magenta);
+      opacity: 0.6;
+    }
+    .footer-links { display: flex; gap: 1.5rem; list-style: none; }
+    .footer-links a { color: var(--muted); text-decoration: none; font-size: 0.8rem; transition: color 0.2s; }
+    .footer-links a:hover { color: var(--magenta); }
+    @media (max-width: 600px) { .nav-links { display: none; } }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <a class="nav-logo" href="index.html">HSC Bot</a>
+    <ul class="nav-links">
+      <li><a href="index.html#features">Features</a></li>
+      <li><a href="index.html#commands">Commands</a></li>
+      <li><a href="index.html#setup">Setup</a></li>
+      <li><a href="tos.html">Terms</a></li>
+      <li><a href="privacy.html">Privacy</a></li>
+    </ul>
+  </nav>
+
+  <div class="page-wrap">
+    <p class="doc-eyebrow">Legal</p>
+    <h1 class="doc-title">Terms of Service</h1>
+    <p class="doc-meta">
+      <strong>Effective Date:</strong> August 8, 2026 &nbsp;·&nbsp; <strong>Last Updated:</strong> August 8, 2026
+    </p>
+
+    <p style="color:var(--muted);font-size:0.95rem;margin-bottom:2.5rem;">
+      Welcome to <strong style="color:var(--text)">High-Speed Connection Bot</strong> ("HSC Bot," "the Bot," "we," "us," or "our") — also known as G33KY Bot.
+      By adding, configuring, or using the Bot in a Discord server, you agree to these Terms. If you don't agree, don't add or use the Bot.
+    </p>
+
+    <div class="doc-section">
+      <h2>1. What the Bot Does</h2>
+      <p>High-Speed Connection Bot is a Discord community-management bot with configurable features including:</p>
+      <ul>
+        <li>Voice-channel camera policy enforcement</li>
+        <li>Camera reminders and configurable grace periods</li>
+        <li>Automatic voice-channel removal when requirements aren't met</li>
+        <li>Member activity tracking and Active/Inactive role management</li>
+        <li>Voice participation tracking and activity-based member status</li>
+        <li>Self-service member reactivation</li>
+        <li>Role-based exemptions</li>
+        <li>Channel indexing and server-management utilities</li>
+        <li>Automated speed-dating / VC shuffle events</li>
+      </ul>
+      <p>Features available to a server depend on how that server's administrators configure the Bot.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>2. Discord</h2>
+      <p>The Bot operates through Discord and depends on Discord's services, APIs, permissions, and availability. Your use of Discord remains subject to <strong>Discord's own Terms of Service, Community Guidelines, and Privacy Policy</strong>. The Bot is an independent third-party application and is not owned, operated, endorsed, or sponsored by Discord.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>3. Server Administrator Responsibility</h2>
+      <p>The person or organization configuring the Bot for a Discord server is responsible for:</p>
+      <ul>
+        <li>Configuring the Bot appropriately for their community</li>
+        <li>Selecting monitored voice channels and active/inactive roles</li>
+        <li>Configuring activity thresholds and exempt roles</li>
+        <li>Establishing appropriate server permissions</li>
+        <li>Informing server members about applicable server rules and policies</li>
+        <li>Ensuring the Bot's use complies with applicable laws and regulations</li>
+      </ul>
+      <p>The Bot provides enforcement tools. <strong>It does not determine what rules a server should have.</strong></p>
+    </div>
+
+    <div class="doc-section">
+      <h2>4. Camera Policy</h2>
+      <p>When enabled by a server administrator, the Bot may monitor whether a member's camera is enabled in designated voice channels. The default system provides a silent grace period, a warning/reminder, a configurable countdown, and removal if the requirement isn't met.</p>
+      <p>The default configuration is a <strong>2-minute silent grace period followed by a 3-minute warning period</strong>, though server administrators may change these settings. Members with designated exemption roles are excluded from camera enforcement.</p>
+      <p>The Bot does <strong>not record, save, or transmit camera video</strong>. It uses Discord's voice-state information only to determine whether the camera requirement is satisfied.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>5. Activity Tracking</h2>
+      <p>When Activity Tracking is enabled, the Bot records limited participation information. By default, a member may be considered active when they send a message in the server, or spend at least one continuous minute in a voice channel.</p>
+      <p>The default activity window is <strong>30 days</strong>. The Bot records the <strong>most recent qualifying activity timestamps</strong> — not a complete history of every message or voice session.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>6. Automated Roles and Restrictions</h2>
+      <p>The Bot may automatically assign or remove server roles based on administrator configuration. A server may use those roles to control access to channels or other server features.</p>
+      <p>The Bot does not automatically create or modify Discord channel permission overwrites unless a server administrator explicitly enables the channel-restriction feature. This feature only acts on the Inactive role's permission overwrites and is never applied automatically or without administrator action.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>7. Reactivation</h2>
+      <p>A server may provide inactive members with a self-service reactivation button. Using the reactivation feature records a new activity timestamp and may restore the Active role, depending on server configuration.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>8. Exemptions</h2>
+      <p>Server administrators may designate Discord roles as exempt from activity tracking or camera enforcement. Exemptions are controlled by individual server administrators and may be changed or removed at any time.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>9. Permissions</h2>
+      <p>The Bot may require Discord permissions and gateway intents to perform its features. Certain features — including removing members from voice channels — require appropriate Discord permissions. If required permissions are removed or denied, some features may not function correctly.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>10. Acceptable Use</h2>
+      <p>You agree not to use the Bot to:</p>
+      <ul>
+        <li>Violate applicable laws or regulations</li>
+        <li>Harass, threaten, stalk, or target individuals</li>
+        <li>Circumvent Discord security or access controls</li>
+        <li>Abuse Discord's API or services</li>
+        <li>Interfere with the Bot's operation</li>
+        <li>Reverse engineer or exploit the Bot for malicious purposes</li>
+        <li>Facilitate unlawful activity</li>
+      </ul>
+      <p>We reserve the right to restrict or terminate access to the Bot where reasonably necessary to protect the Bot, its infrastructure, Discord communities, or other users.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>11. Availability</h2>
+      <p>The Bot is provided on an <strong>"as is" and "as available"</strong> basis. We do not guarantee that the Bot will always be online, commands will always respond immediately, or data will never be lost. Third-party outages, Discord API changes, hosting failures, and other circumstances may affect the Bot.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>12. No Guarantee of Moderation Results</h2>
+      <p>The Bot is an automation tool. We do not guarantee that its use will prevent harassment, misconduct, inactivity, or other behavior within a Discord server. Server administrators remain responsible for moderation decisions and community management.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>13. Intellectual Property</h2>
+      <p>High-Speed Connection Bot, including its software, branding, graphics, documentation, and original content, is owned by its developers unless otherwise stated. You may not copy, redistribute, sell, sublicense, or commercially exploit the Bot or its proprietary materials without authorization.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>14. Termination</h2>
+      <p>We may discontinue the Bot, suspend access, modify features, or terminate service at any time. Server administrators may remove the Bot from their server at any time.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>15. Limitation of Liability</h2>
+      <p>To the maximum extent permitted by applicable law, the Bot's developers will not be liable for indirect, incidental, consequential, special, exemplary, or punitive damages arising from or related to the use or inability to use the Bot.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>16. Changes to These Terms</h2>
+      <p>We may update these Terms from time to time. Updated Terms will be posted at this URL. Your continued use of the Bot after updated Terms become effective constitutes acceptance of the revised Terms, to the extent permitted by applicable law.</p>
+    </div>
+
+    <div class="doc-section">
+      <h2>17. Contact</h2>
+      <p>Questions regarding these Terms may be sent to: <a href="mailto:dragon.exe@atomicmail.io">dragon.exe@atomicmail.io</a></p>
+    </div>
+  </div>
+
+  <footer>
+    <div class="footer-brand">HIGH-SPEED CONNECTION BOT</div>
+    <ul class="footer-links">
+      <li><a href="index.html">Home</a></li>
+      <li><a href="tos.html">Terms</a></li>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="mailto:dragon.exe@atomicmail.io">Contact</a></li>
+    </ul>
+  </footer>
+
+</body>
+</html>

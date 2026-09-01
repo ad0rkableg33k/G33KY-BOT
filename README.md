@@ -1,13 +1,9 @@
-# xXOnlineStatusXx Channel Indexer Bot
+# High-Speed Connection Bot
+### (aka G33KY Bot)
 
-Exports every channel in your server to `channels.json` and can post a
-formatted, categorized index (name + clickable link + topic) into any
-channel via a slash command. Also includes an optional, per-server
-"cameras-on" voice channel policy.
+A Discord community-management bot for servers that actually care about engagement. Camera policy enforcement, activity tracking, channel indexing, and automated speed-dating events — all configurable per-server via slash commands, no code edits needed.
 
-This bot only **reads** channel info and **posts messages** (plus, if the
-camera policy is turned on, disconnects people from voice who don't turn
-their camera on in time) — it does not rename, delete, or edit any channel.
+---
 
 ## Setup
 
@@ -39,6 +35,8 @@ their camera on in time) — it does not rename, delete, or edit any channel.
      appear after a change, then it's instant)
    - Write `channels.json` to this folder automatically
 
+---
+
 ## Using it in Discord
 
 - `/channel-index` — posts a categorized embed listing every channel with
@@ -50,6 +48,8 @@ their camera on in time) — it does not rename, delete, or edit any channel.
   their raw user ID if they've left. Shows their account creation date,
   avatar, banner (if set), and — if they're still a member — nickname,
   join date, and roles too.
+
+---
 
 ## Adding your own channel descriptions
 
@@ -74,8 +74,7 @@ To add descriptions:
 
 Channels left with an empty `""` description just show as `#channel-name`
 with no blurb, same as before. This is completely separate from Discord's
-built-in channel Topic field, so nothing pulled from Discord (including any
-messy pinned templates in a channel's topic) will ever show up here.
+built-in channel Topic field.
 
 ## Stopping the bot
 
@@ -109,9 +108,8 @@ edits needed.
    full grace period, fresh reminder, fresh countdown.
 
 **We switched from DMs to in-channel @pings** because members were finding
-the DMs intrusive. Pinging in the voice channel's own text chat (the chat
-panel built into every voice channel) keeps it visible in-context instead
-of landing in someone's private messages.
+the DMs intrusive. Pinging in the voice channel's own text chat keeps it
+visible in-context instead of landing in someone's private messages.
 
 ### This feature needs two things enabled that the rest of the bot didn't
 
@@ -138,9 +136,7 @@ in the terminal).
 ### Turning the policy on/off
 
 `/camera-policy state:On` or `/camera-policy state:Off` — no restart
-needed. Requires **Manage Server** permission. Per-server — one server
-switching it off never affects another. Turning it off immediately cancels
-any reminders/countdowns currently in progress in that server.
+needed. Requires **Manage Server** permission. Per-server.
 
 ### Choosing which voice channels to monitor
 
@@ -151,8 +147,7 @@ any reminders/countdowns currently in progress in that server.
 ### Exempting roles
 
 For members who have legitimate reasons not to use a camera (anxiety,
-privacy, etc.) — exempt roles never get a reminder or get moved, no matter
-how long their camera's off.
+privacy, etc.) — exempt roles never get a reminder or get moved.
 
 - `/camera-exempt-role add role:@Camera Exempt`
 - `/camera-exempt-role remove role:@Camera Exempt`
@@ -161,17 +156,12 @@ how long their camera's off.
 ### Adjusting the timing
 
 Defaults are 2 minutes (silent grace) + 3 minutes (after the reminder) = 5
-minutes total before removal — matching the originally announced policy.
-Adjustable per server:
+minutes total before removal. Adjustable per server:
 
 - `/camera-timing set grace_minutes:2 warning_minutes:3`
 - `/camera-timing view`
 
 ### Linking your policy announcement
-
-If you've posted an announcement explaining the policy (like the original
-xXOnlineStatusXx one), you can attach that link so it's automatically
-included at the bottom of every reminder message:
 
 - `/camera-announcement set url:https://discord.com/channels/...`
 - `/camera-announcement clear`
@@ -179,39 +169,32 @@ included at the bottom of every reminder message:
 
 ### Multi-server notes
 
-Every setting above (on/off, monitored channels, exempt roles, timing,
-announcement link) is stored **per server** in `camera-config.json`,
-keyed by server ID. A friend's server can set up and run its own
-completely independent camera policy without touching any code or
-affecting xXOnlineStatusXx's settings, and vice versa.
-
-xXOnlineStatusXx's original hardcoded channel/role list was automatically
-migrated into this file the first time this version ran, so nothing was
-lost or reset.
+Every setting is stored **per server** in `camera-config.json`, keyed by
+server ID. One server's configuration never affects another.
 
 ### Important — Railway persistence
 
 `camera-config.json`, `channels.json`, and `descriptions.json` all live on
 local disk. Many hosting platforms (Railway included, by default) do NOT
-persist local files across redeploys — meaning every code push could wipe
-these files and reset to the seeded defaults, losing any settings servers
-configured via slash commands since the last deploy. The fix is attaching
-a Railway Volume (persistent disk) to the project. Ask Claude to walk
-through this setup if it hasn't been done yet, or if configured settings
-start disappearing after a push.
+persist local files across redeploys. The fix is attaching a Railway Volume
+to the project.
 
-### Setting up a Railway Volume (do this before pushing the update above)
+### Setting up a Railway Volume
 
 1. Open your project on Railway
-2. Right-click empty space on the project canvas (or press `Cmd/Ctrl+K` for
-   the command palette) and choose **"Create Volume"**
+2. Right-click empty space on the project canvas and choose **"Create Volume"**
 3. Attach it to your bot's service
 4. Set the **mount path** to `/data`
-5. Go to your service → **Variables** tab → add a new variable:
-   - `DATA_DIR` = `/data`
-6. Redeploy (Railway will usually do this automatically after adding the
-   variable — check the Deployments tab)
+5. Go to your service → **Variables** tab → add: `DATA_DIR` = `/data`
+6. Redeploy
 
-From then on, `camera-config.json`, `channels.json`, and `descriptions.json`
-will live on that persistent volume instead of the app's temporary
-filesystem, so they survive every future code push.
+From then on, config files will live on that persistent volume and survive
+every future code push.
+
+---
+
+## Legal
+
+- [Terms of Service](https://ad0rkableg33k.github.io/G33KY-BOT/tos.html)
+- [Privacy Policy](https://ad0rkableg33k.github.io/G33KY-BOT/privacy.html)
+- Contact: dragon.exe@atomicmail.io

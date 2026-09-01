@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>High-Speed Connection Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --magenta: #d400ff;
+      --magenta-dim: #a000cc;
+      --magenta-glow: rgba(212, 0, 255, 0.35);
+      --magenta-faint: rgba(212, 0, 255, 0.08);
+      --bg: #080808;
+      --surface: #111;
+      --border: rgba(212, 0, 255, 0.2);
+      --text: #e0e0e0;
+      --muted: #888;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── SCANLINE OVERLAY ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.06) 2px,
+        rgba(0,0,0,0.06) 4px
+      );
+      pointer-events: none;
+      z-index: 999;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1rem 2rem;
+      background: rgba(8,8,8,0.85);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-logo {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.4rem;
+      letter-spacing: 0.1em;
+      color: var(--magenta);
+      text-shadow: 0 0 12px var(--magenta-glow);
+      text-decoration: none;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 2rem;
+      list-style: none;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      transition: color 0.2s;
+    }
+
+    .nav-links a:hover { color: var(--magenta); }
+
+    /* ── HERO ── */
+    .hero {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 6rem 2rem 4rem;
+      position: relative;
+    }
+
+    .hero::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 50%; transform: translateX(-50%);
+      width: 1px;
+      height: 80px;
+      background: linear-gradient(to bottom, var(--magenta), transparent);
+    }
+
+    /* radial glow behind the title */
+    .hero-glow {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -60%);
+      width: 600px; height: 600px;
+      background: radial-gradient(ellipse, rgba(212,0,255,0.12) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-eyebrow {
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.25em;
+      text-transform: uppercase;
+      color: var(--magenta);
+      margin-bottom: 1.5rem;
+      opacity: 0.8;
+    }
+
+    .hero-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(4rem, 14vw, 10rem);
+      line-height: 0.9;
+      letter-spacing: 0.04em;
+      color: var(--magenta);
+      text-shadow:
+        0 0 20px var(--magenta-glow),
+        0 0 60px rgba(212, 0, 255, 0.2),
+        0 0 120px rgba(212, 0, 255, 0.1);
+      margin-bottom: 0.2em;
+    }
+
+    .hero-title .sub {
+      display: block;
+      font-size: clamp(2.5rem, 8vw, 6rem);
+      color: #fff;
+      text-shadow: 0 0 40px rgba(212, 0, 255, 0.3);
+      letter-spacing: 0.12em;
+    }
+
+    .hero-desc {
+      max-width: 540px;
+      color: var(--muted);
+      font-size: 1rem;
+      line-height: 1.7;
+      margin: 2rem auto 2.5rem;
+    }
+
+    .hero-desc strong { color: var(--text); font-weight: 500; }
+
+    .cta-row {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1.75rem;
+      border-radius: 4px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      text-decoration: none;
+      transition: all 0.2s;
+      letter-spacing: 0.03em;
+    }
+
+    .btn-primary {
+      background: var(--magenta);
+      color: #000;
+      box-shadow: 0 0 20px var(--magenta-glow);
+    }
+
+    .btn-primary:hover {
+      background: #ff33ff;
+      box-shadow: 0 0 35px rgba(212, 0, 255, 0.6);
+      transform: translateY(-1px);
+    }
+
+    .btn-ghost {
+      border: 1px solid var(--border);
+      color: var(--text);
+      background: transparent;
+    }
+
+    .btn-ghost:hover {
+      border-color: var(--magenta);
+      color: var(--magenta);
+      box-shadow: 0 0 15px var(--magenta-faint);
+    }
+
+    /* ── FEATURES ── */
+    .section {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 6rem 2rem;
+    }
+
+    .section-label {
+      font-size: 0.7rem;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: var(--magenta);
+      margin-bottom: 1rem;
+      opacity: 0.7;
+    }
+
+    .section-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(2.5rem, 6vw, 4rem);
+      letter-spacing: 0.05em;
+      color: #fff;
+      line-height: 1;
+      margin-bottom: 3rem;
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+    }
+
+    .feature-card {
+      background: var(--bg);
+      padding: 2rem;
+      transition: background 0.2s;
+    }
+
+    .feature-card:hover {
+      background: var(--magenta-faint);
+    }
+
+    .feature-icon {
+      font-size: 1.5rem;
+      margin-bottom: 1rem;
+      display: block;
+    }
+
+    .feature-name {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.3rem;
+      letter-spacing: 0.08em;
+      color: var(--magenta);
+      margin-bottom: 0.5rem;
+    }
+
+    .feature-desc {
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+
+    /* ── COMMANDS ── */
+    .commands-section {
+      border-top: 1px solid var(--border);
+    }
+
+    .cmd-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .cmd-row {
+      display: grid;
+      grid-template-columns: 1fr 2fr;
+      gap: 2rem;
+      padding: 1.25rem 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      align-items: start;
+    }
+
+    .cmd-name {
+      font-family: 'Inter', monospace;
+      font-size: 0.85rem;
+      color: var(--magenta);
+      background: var(--magenta-faint);
+      border: 1px solid var(--border);
+      padding: 0.2rem 0.6rem;
+      border-radius: 3px;
+      white-space: nowrap;
+      display: inline-block;
+    }
+
+    .cmd-desc {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    /* ── SETUP ── */
+    .setup-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 2rem;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 3rem 1fr;
+      gap: 1.5rem;
+      align-items: start;
+    }
+
+    .step-num {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 2.5rem;
+      color: var(--magenta);
+      opacity: 0.4;
+      line-height: 1;
+    }
+
+    .step-content h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 0.4rem;
+    }
+
+    .step-content p {
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+
+    code {
+      font-family: 'Courier New', monospace;
+      background: var(--magenta-faint);
+      border: 1px solid var(--border);
+      padding: 0.1em 0.4em;
+      border-radius: 3px;
+      font-size: 0.85em;
+      color: var(--magenta);
+    }
+
+    /* ── FOOTER ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    .footer-brand {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.1rem;
+      letter-spacing: 0.1em;
+      color: var(--magenta);
+      opacity: 0.6;
+    }
+
+    .footer-links {
+      display: flex;
+      gap: 1.5rem;
+      list-style: none;
+    }
+
+    .footer-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.8rem;
+      transition: color 0.2s;
+    }
+
+    .footer-links a:hover { color: var(--magenta); }
+
+    .aka {
+      color: var(--muted);
+      font-size: 0.75rem;
+      margin-top: 0.5rem;
+      opacity: 0.6;
+    }
+
+    @media (max-width: 600px) {
+      .nav-links { display: none; }
+      .cmd-row { grid-template-columns: 1fr; gap: 0.5rem; }
+      footer { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <a class="nav-logo" href="#">HSC Bot</a>
+    <ul class="nav-links">
+      <li><a href="#features">Features</a></li>
+      <li><a href="#commands">Commands</a></li>
+      <li><a href="#setup">Setup</a></li>
+      <li><a href="tos.html">Terms</a></li>
+      <li><a href="privacy.html">Privacy</a></li>
+    </ul>
+  </nav>
+
+  <section class="hero">
+    <div class="hero-glow"></div>
+    <p class="hero-eyebrow">Discord Community Bot</p>
+    <h1 class="hero-title">
+      HIGH-SPEED
+      <span class="sub">CONNECTION</span>
+    </h1>
+    <p class="hero-desc">
+      A <strong>no-nonsense Discord bot</strong> for servers that actually care about member engagement.
+      Camera policy enforcement, activity tracking, channel indexing, speed-dating events — 
+      all configurable per-server, no code edits needed.
+    </p>
+    <div class="cta-row">
+      <a href="https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=8&scope=bot%20applications.commands" class="btn btn-primary">
+        ⚡ Add to Server
+      </a>
+      <a href="https://github.com/ad0rkableg33k/G33KY-BOT" class="btn btn-ghost">
+        View on GitHub
+      </a>
+    </div>
+    <p class="aka">aka G33KY Bot</p>
+  </section>
+
+  <section class="section" id="features">
+    <p class="section-label">What it does</p>
+    <h2 class="section-title">Built for active communities</h2>
+    <div class="features-grid">
+      <div class="feature-card">
+        <span class="feature-icon">📷</span>
+        <div class="feature-name">Camera Policy</div>
+        <p class="feature-desc">Two-stage enforcement — silent grace period, one in-channel ping, then removal if needed. No DM spam. Fully configurable timing and exempt roles.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">📊</span>
+        <div class="feature-name">Activity Tracking</div>
+        <p class="feature-desc">Rolling 30-day activity window. Tracks message and voice activity timestamps — not content. Auto-assigns Active/Inactive roles so your server stays clean.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">📋</span>
+        <div class="feature-name">Channel Indexer</div>
+        <p class="feature-desc">Exports every channel to JSON and posts a formatted, clickable index embed. Custom descriptions supported. No restart required after edits.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">💨</span>
+        <div class="feature-name">Speed Dating Events</div>
+        <p class="feature-desc">Automated VC shuffle for High-Speed Connection events. Timed rounds, automatic pairings, no-repeat logic, staff control panel. 1-on-1, 2v2, or 3v3.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🔍</span>
+        <div class="feature-name">User Lookup</div>
+        <p class="feature-desc">Pull full profile info for any user — including members who've left. Account age, avatar, banner, join date, roles. Works by ID if they're already gone.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🖥️</span>
+        <div class="feature-name">Per-Server Config</div>
+        <p class="feature-desc">Every setting stored separately per server. One server's configuration never touches another. Slash commands only — no code changes needed.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section commands-section" id="commands">
+    <p class="section-label">Commands</p>
+    <h2 class="section-title">Slash command reference</h2>
+    <div class="cmd-list">
+      <div class="cmd-row">
+        <span class="cmd-name">/channel-index</span>
+        <span class="cmd-desc">Posts a categorized embed with clickable links to every channel. Filter by category with <code>category:Name</code>.</span>
+      </div>
+      <div class="cmd-row">
+        <span class="cmd-name">/export-channels</span>
+        <span class="cmd-desc">Sends you <code>channels.json</code> directly in Discord. Ephemeral — only you see it.</span>
+      </div>
+      <div class="cmd-row">
+        <span class="cmd-name">/userinfo</span>
+        <span class="cmd-desc">Profile info for any user. Works even if they've left the server — pass their raw user ID.</span>
+      </div>
+      <div class="cmd-row">
+        <span class="cmd-name">/camera-policy</span>
+        <span class="cmd-desc">Toggle camera enforcement on or off. No restart needed. Requires Manage Server.</span>
+      </div>
+      <div class="cmd-row">
+        <span class="cmd-name">/camera-monitor</span>
+        <span class="cmd-desc">Add, remove, or list monitored voice channels.</span>
+      </div>
+      <div class="cmd-row">
+        <span class="cmd-name">/camera-exempt-role</span>
+        <span class="cmd-desc">Manage roles that skip camera enforcement entirely.</span>
+      </div>
+      <div class="cmd-row">
+        <span class="cmd-name">/camera-timing</span>
+        <span class="cmd-desc">Set grace and warning period lengths. Default: 2 min silent + 3 min warning.</span>
+      </div>
+      <div class="cmd-row">
+        <span class="cmd-name">/camera-announcement</span>
+        <span class="cmd-desc">Attach a policy announcement URL to reminder messages.</span>
+      </div>
+      <div class="cmd-row">
+        <span class="cmd-name">/vc-shuffle</span>
+        <span class="cmd-desc">High-Speed Connection event control — configure and run speed-dating rounds.</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="setup">
+    <p class="section-label">Get started</p>
+    <h2 class="section-title">Up in five minutes</h2>
+    <div class="setup-steps">
+      <div class="step">
+        <span class="step-num">01</span>
+        <div class="step-content">
+          <h3>Add the bot to your server</h3>
+          <p>Use the invite link above. Make sure the bot role sits above the roles it needs to manage in your server's hierarchy.</p>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-num">02</span>
+        <div class="step-content">
+          <h3>Configure via slash commands</h3>
+          <p>No config files to edit. Set up camera policy, activity tracking, and event settings entirely through Discord slash commands.</p>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-num">03</span>
+        <div class="step-content">
+          <h3>Enable privileged intents (camera + activity features)</h3>
+          <p>Discord Developer Portal → your bot → Bot page → Privileged Gateway Intents → enable <strong>Server Members Intent</strong>. Required for member tracking features.</p>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-num">04</span>
+        <div class="step-content">
+          <h3>Self-hosting? Grab the source</h3>
+          <p>Node.js + <code>npm install</code> + a <code>.env</code> with your bot token and guild ID. Railway-compatible with persistent volume support. Full instructions in the <a href="https://github.com/ad0rkableg33k/G33KY-BOT" style="color:var(--magenta)">README</a>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div>
+      <div class="footer-brand">HIGH-SPEED CONNECTION BOT</div>
+      <div class="aka">aka G33KY Bot · ad0rkableg33k</div>
+    </div>
+    <ul class="footer-links">
+      <li><a href="https://github.com/ad0rkableg33k/G33KY-BOT">GitHub</a></li>
+      <li><a href="tos.html">Terms of Service</a></li>
+      <li><a href="privacy.html">Privacy Policy</a></li>
+      <li><a href="mailto:dragon.exe@atomicmail.io">Contact</a></li>
+    </ul>
+  </footer>
+
+</body>
+</html>
