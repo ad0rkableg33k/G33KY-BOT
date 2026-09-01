@@ -194,21 +194,7 @@
         <li>Server membership information</li>
         <li>Discord roles</li>
         <li>Username or display information when required for a command</li>
-        <li>Server join information where required for activity calculations</li>
       </ul>
-
-      <p><strong>Activity Information</strong> (when Activity Tracking is enabled)</p>
-      <ul>
-        <li>Discord user ID</li>
-        <li>Server ID</li>
-        <li>Time of the member's most recent qualifying message activity</li>
-        <li>Time of the member's most recent qualifying voice activity</li>
-      </ul>
-      <p>These activity records are stored in <code>activity-data.json</code>.</p>
-
-      <p><strong>Voice Activity</strong> — the Bot may detect when a member joins, leaves, or changes voice channels, or remains in voice long enough to satisfy the configured activity threshold. For Activity Tracking, the Bot records the resulting qualifying activity timestamp rather than maintaining a permanent record of every voice session.</p>
-
-      <p><strong>Message Activity</strong> — when Activity Tracking is enabled, the Bot observes server messages to determine whether a member has participated. It records the <strong>time of the member's latest qualifying message</strong>, not the message content.</p>
 
       <p><strong>Camera Status</strong> — when the Camera Policy is enabled, the Bot receives relevant Discord voice-state information to determine whether a member's camera is enabled. The Bot does not record or store the member's actual camera video.</p>
     </div>
@@ -218,22 +204,19 @@
       <p>The Bot does not intentionally collect or store:</p>
       <ul>
         <li>Camera recordings, microphone recordings, or audio recordings</li>
-        <li>Copies of members' message content for Activity Tracking</li>
-        <li>Private messages for Activity Tracking</li>
+        <li>Copies of members' message content</li>
+        <li>Private messages</li>
         <li>Passwords or Discord account credentials</li>
         <li>Payment card information</li>
       </ul>
-      <p>The Activity Tracker is designed around activity timestamps rather than storing a complete message history.</p>
     </div>
 
     <div class="doc-section">
       <h2>3. How We Use Information</h2>
       <p>Information collected by the Bot is used to:</p>
       <ul>
-        <li>Determine member activity status and assign Active or Inactive roles</li>
         <li>Determine whether camera requirements are satisfied</li>
         <li>Send camera reminders and remove members from monitored voice channels when configured</li>
-        <li>Process member reactivation</li>
         <li>Provide administrator commands</li>
         <li>Maintain server-specific configuration</li>
         <li>Diagnose technical problems and maintain the Bot</li>
@@ -244,16 +227,13 @@
       <h2>4. Server-Specific Configuration</h2>
       <p>The Bot stores configuration separately for each Discord server, keyed by server ID.</p>
       <p><strong>Camera configuration</strong> may include: whether the camera policy is enabled, monitored voice channels, exempt roles, grace-period and warning-period settings, and the policy announcement link.</p>
-      <p><strong>Activity configuration</strong> may include: enabled/disabled status, active role, inactive role, activity threshold, reactivation/quarantine channel, exempt roles, and whether channel-permission restrictions have been applied for the Inactive role.</p>
     </div>
 
     <div class="doc-section">
       <h2>5. Data Storage</h2>
-      <p>The Bot currently stores configuration and activity information in local application data files, which may include:</p>
+      <p>The Bot currently stores configuration information in local application data files, which may include:</p>
       <ul>
         <li><code>camera-config.json</code></li>
-        <li><code>activity-config.json</code></li>
-        <li><code>activity-data.json</code></li>
         <li><code>channels.json</code></li>
         <li><code>descriptions.json</code></li>
       </ul>
@@ -267,10 +247,7 @@
 
     <div class="doc-section">
       <h2>7. Data Retention</h2>
-      <p>The Bot's Activity Tracker uses a rolling activity window, which defaults to <strong>30 days</strong> but may be changed by the server administrator.</p>
-      <p>A member's stored activity timestamps (<code>lastMessageAt</code> and <code>lastVoiceActiveAt</code>) are permanently deleted after <strong>90 days</strong> by default, unless the server administrator has configured a different retention period. Retention cannot be configured shorter than the server's activity window.</p>
-      <p>This cleanup runs automatically on a recurring schedule. Server administrators can also trigger the cleanup manually, using the Bot's administrator commands.</p>
-      <p>Deleting a stored record does not, by itself, change a member's current Active or Inactive role — a record old enough to be deleted has already aged past the activity window and would already reflect Inactive status.</p>
+      <p>Server configuration data is retained for as long as the Bot is active in a server. Removing the Bot from a server does not automatically delete stored configuration. Requests for deletion may be sent to <a href="mailto:dragon.exe@atomicmail.io">dragon.exe@atomicmail.io</a>.</p>
     </div>
 
     <div class="doc-section">
