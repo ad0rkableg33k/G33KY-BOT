@@ -260,14 +260,14 @@ function ensureDescriptionsFile(guild) {
 // ===========================================================================
 //  VC SHUFFLE / HIGH-SPEED CONNECTION
 // ===========================================================================
-const VC_SHUFFLE_CONFIG_FILE = dataPath('vc-shuffle-config.json');
+const VC_SHUFFLE_CONFIG_FILE = dataPath('speed-match-config.json');
 function loadVcShuffleConfig() {
   try { return JSON.parse(fs.readFileSync(VC_SHUFFLE_CONFIG_FILE, 'utf-8')); }
   catch { return {}; }
 }
 function saveVcShuffleConfig(d) {
   try { fs.writeFileSync(VC_SHUFFLE_CONFIG_FILE, JSON.stringify(d, null, 2)); return true; }
-  catch (err) { console.error('[vc-shuffle] save fail:', err.message); return false; }
+  catch (err) { console.error('[speed-match] save fail:', err.message); return false; }
 }
 let vcShuffleConfig = loadVcShuffleConfig();
 
@@ -434,8 +434,8 @@ async function cleanupShuffleChannels(guild, cfg) {
   const toDelete = [...cfg.createdChannelIds];
   cfg.createdChannelIds = []; saveVcShuffleConfig(vcShuffleConfig);
   for (const id of toDelete) {
-    try { const ch = guild.channels.cache.get(id); if (ch) await ch.delete('VC Shuffle session ended'); }
-    catch (err) { console.error(`[vc-shuffle] delete temp channel ${id}:`, err.message); }
+    try { const ch = guild.channels.cache.get(id); if (ch) await ch.delete('Speed Match session ended'); }
+    catch (err) { console.error(`[speed-match] delete temp channel ${id}:`, err.message); }
   }
 }
 
@@ -447,8 +447,8 @@ async function moveEveryoneToLobby(guild, cfg) {
     const ch = guild.channels.cache.get(channelId);
     if (!ch) continue;
     for (const m of ch.members.values()) {
-      try { await m.voice.setChannel(lobby, 'VC Shuffle: returning to lobby'); }
-      catch (err) { console.error(`[vc-shuffle] move to lobby:`, err.message); }
+      try { await m.voice.setChannel(lobby, 'Speed Match: returning to lobby'); }
+      catch (err) { console.error(`[speed-match] move to lobby:`, err.message); }
     }
   }
 }
@@ -468,7 +468,7 @@ async function postRoomActionButtons(guild, guildId, roomCh, groupMembers) {
       components: [row],
     });
     roomButtonMessages.set(roomCh.id, msg.id);
-  } catch (err) { console.error(`[vc-shuffle] postRoomActionButtons:`, err.message); }
+  } catch (err) { console.error(`[speed-match] postRoomActionButtons:`, err.message); }
 }
 async function runShuffleRound(guild, guildId) {
   const cfg = ensureVcShuffleGuildConfig(guildId);
@@ -491,7 +491,7 @@ async function runShuffleRound(guild, guildId) {
     }
   }
   state.matchAgainVotes = new Map();
-  console.log(`[vc-shuffle] Guild ${guildId}: round #${round}, rePairs=${matchPairs.length}`);
+  console.log(`[speed-match] Guild ${guildId}: round #${round}, rePairs=${matchPairs.length}`);
 
   // Collect pool from lobby + cloud rooms
   const cloudRoomIds = cfg.cloudRoomIds || [];
@@ -510,7 +510,7 @@ async function runShuffleRound(guild, guildId) {
   const matchupCh = matchupTarget ? guild.channels.cache.get(matchupTarget) : null;
 
   if (pool.length < 2) {
-    console.log(`[vc-shuffle] Guild ${guildId}: only ${pool.length} member(s) — skipping round`);
+    console.log(`[speed-match] Guild ${guildId}: only ${pool.length} member(s) — skipping round`);
     if (matchupCh) {
       const msg = await matchupCh.send(`⚠️ Not enough people in the lobby for Round #${round} — waiting for more to join!`).catch(() => null);
       if (msg) setTimeout(() => msg.delete().catch(() => {}), 15000);
@@ -561,13 +561,13 @@ async function runShuffleRound(guild, guildId) {
         roomCh = await guild.channels.create({ name: `💨・ᴄʟᴏᴜᴅ・ʀᴏᴏᴍ・${i + 1}`, type: ChannelType.GuildVoice, parent: cfg.categoryId || null, reason: `💨 HSC round #${round} overflow` });
         if (!cfg.cloudRoomIds) cfg.cloudRoomIds = [];
         cfg.cloudRoomIds.push(roomCh.id);
-      } catch (err) { console.error(`[vc-shuffle] create overflow room:`, err.message); continue; }
+      } catch (err) { console.error(`[speed-match] create overflow room:`, err.message); continue; }
     }
     activeRoomIds.push(roomCh.id);
     for (const m of groups[i])
       await roomCh.permissionOverwrites.edit(m, { ViewChannel: true, Connect: true, Speak: true }).catch(() => {});
     for (const m of groups[i])
-      await m.voice.setChannel(roomCh, `💨 HSC round #${round}`).catch(err => console.error(`[vc-shuffle] move ${m.id}:`, err.message));
+      await m.voice.setChannel(roomCh, `💨 HSC round #${round}`).catch(err => console.error(`[speed-match] move ${m.id}:`, err.message));
     await postRoomActionButtons(guild, guildId, roomCh, groups[i]);
   }
 
@@ -600,7 +600,7 @@ async function runShuffleRound(guild, guildId) {
         .setTimestamp();
       await matchupCh.send({ embeds: [embed] });
       if (allMet) { state.pairHistory = new Set(); state.skipHistory = new Set(); }
-    } catch (err) { console.error(`[vc-shuffle] post matchups:`, err.message); }
+    } catch (err) { console.error(`[speed-match] post matchups:`, err.message); }
   }
   await refreshStaffPanel(guild, guildId);
 
@@ -618,7 +618,7 @@ async function runShuffleRound(guild, guildId) {
   const cur = shuffleState.get(guildId) || state;
   cur.warningTimeoutId = warningTimeoutId;
   shuffleState.set(guildId, cur);
-  console.log(`[vc-shuffle] Guild ${guildId}: round #${round} — ${pool.length} people in ${groups.length} rooms`);
+  console.log(`[speed-match] Guild ${guildId}: round #${round} — ${pool.length} people in ${groups.length} rooms`);
 }
 
 function buildStaffPanelContent(guildId) {
@@ -658,7 +658,7 @@ async function refreshStaffPanel(guild, guildId) {
     }
     const msg = await ch.send(content);
     cfg.staffPanelMessageId = msg.id; saveVcShuffleConfig(vcShuffleConfig);
-  } catch (err) { console.error(`[vc-shuffle] refreshStaffPanel:`, err.message); }
+  } catch (err) { console.error(`[speed-match] refreshStaffPanel:`, err.message); }
 }
 
 async function postBellMessage(guild, guildId) {
@@ -670,7 +670,7 @@ async function postBellMessage(guild, guildId) {
     const state = shuffleState.get(guildId);
     const msg = await ch.send(BELL_MESSAGES[(state?.roundNumber ?? 0) % BELL_MESSAGES.length]);
     setTimeout(() => msg.delete().catch(() => {}), 10000);
-  } catch (err) { console.error(`[vc-shuffle] postBellMessage:`, err.message); }
+  } catch (err) { console.error(`[speed-match] postBellMessage:`, err.message); }
 }
 
 function randomIntervalMs(cfg) {
@@ -687,13 +687,13 @@ function scheduleNextShuffle(guild, guildId) {
   if (state.warningTimeoutId) clearTimeout(state.warningTimeoutId);
   const timeoutId = setTimeout(async () => {
     try { await postBellMessage(guild, guildId); await runShuffleRound(guild, guildId); }
-    catch (err) { console.error(`[vc-shuffle] round error ${guildId}:`, err.message); }
+    catch (err) { console.error(`[speed-match] round error ${guildId}:`, err.message); }
     const freshCfg = ensureVcShuffleGuildConfig(guildId);
     if (freshCfg.enabled) scheduleNextShuffle(guild, guildId);
     else shuffleState.delete(guildId);
   }, delay);
   shuffleState.set(guildId, { ...state, timeoutId, warningTimeoutId: null, nextShuffleAt: nextAt });
-  console.log(`[vc-shuffle] Guild ${guildId}: next round in ${Math.round(delay / 1000)}s`);
+  console.log(`[speed-match] Guild ${guildId}: next round in ${Math.round(delay / 1000)}s`);
 }
 
 async function startVcShuffle(guild, guildId, runImmediately = false) {
@@ -717,7 +717,7 @@ async function stopVcShuffle(guild, guildId) {
       const ch = guild.channels.cache.get(chId); if (!ch) continue;
       for (const m of ch.members.values()) {
         try { if (m.roles.cache.has(cfg.participantRoleId)) await m.roles.remove(cfg.participantRoleId, '💨 HSC: session ended'); }
-        catch (err) { console.error(`[vc-shuffle] remove participant role:`, err.message); }
+        catch (err) { console.error(`[speed-match] remove participant role:`, err.message); }
       }
     }
   }
@@ -731,7 +731,7 @@ async function stopVcShuffle(guild, guildId) {
           .setTimestamp();
         await textCh.send({ embeds: [embed] });
       }
-    } catch (err) { console.error(`[vc-shuffle] session summary:`, err.message); }
+    } catch (err) { console.error(`[speed-match] session summary:`, err.message); }
   }
   shuffleState.delete(guildId); await refreshStaffPanel(guild, guildId);
 }
@@ -741,7 +741,7 @@ client.once('clientReady', () => {
   for (const [guildId, cfg] of Object.entries(vcShuffleConfig)) {
     if (!cfg.enabled) continue;
     const guild = client.guilds.cache.get(guildId); if (!guild) continue;
-    console.log(`[vc-shuffle] Resuming for guild ${guildId}`);
+    console.log(`[speed-match] Resuming for guild ${guildId}`);
     shuffleState.set(guildId, { roundNumber: 0, pairHistory: new Set(), skipHistory: new Set(), matchAgainVotes: new Map() });
     scheduleNextShuffle(guild, guildId);
   }
@@ -760,7 +760,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       try {
         if (!newState.member.roles.cache.has(sc.participantRoleId))
           await newState.member.roles.add(sc.participantRoleId, '💨 HSC: joined lobby');
-      } catch (err) { console.error(`[vc-shuffle] participant role assign fail:`, err.message); }
+      } catch (err) { console.error(`[speed-match] participant role assign fail:`, err.message); }
     }
   }
 
@@ -1027,7 +1027,7 @@ const commands = [
     .addSubcommand(sub => sub.setName('set').setDescription('Set the announcement link').addStringOption(opt => opt.setName('url').setDescription('Link to your policy post').setRequired(true)))
     .addSubcommand(sub => sub.setName('clear').setDescription('Remove the announcement link'))
     .addSubcommand(sub => sub.setName('view').setDescription('View the current announcement link')),
-  new SlashCommandBuilder().setName('vc-shuffle').setDescription('High-Speed Connection — VC speed dating event')
+  new SlashCommandBuilder().setName('speed-match').setDescription('High-Speed Connection — VC speed match event')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addSubcommand(sub => sub.setName('start').setDescription('Start the session (runs first round immediately)'))
     .addSubcommand(sub => sub.setName('stop').setDescription('Stop the session and clean up'))
@@ -1073,7 +1073,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '📋 General',              value: '`/help` `/botinfo` `/serverinfo` `/userinfo` `/roleinfo` `/purge`', inline: false },
           { name: '# Channel Index',         value: '`/channel-index` `/export-channels`', inline: false },
           { name: '📷 Camera Policy',        value: '`/camera-policy` `/camera-status` `/camera-monitor` `/camera-exempt-role` `/camera-timing` `/camera-announcement`', inline: false },
-          { name: '💨 High-Speed Connection',value: '`/vc-shuffle start/stop/status/shuffle-now/end-session`\n`/vc-shuffle set-connection-mode` `/vc-shuffle set-holding-channel` and more', inline: false },
+          { name: '💨 High-Speed Connection',value: '`/speed-match start/stop/status/shuffle-now/end-session`\n`/speed-match set-connection-mode` `/speed-match set-holding-channel` and more', inline: false },
           { name: '⚙️ Admin',                value: '`/setup` — interactive config menu', inline: false },
           { name: '📖 Dashboard',            value: 'high-speed-connection.up.railway.app — log in with Discord', inline: false },
         ).setFooter({ text: 'HIGH-SPEED CONNECTION BOT · Made with 🖤' });
@@ -1346,13 +1346,13 @@ client.on('interactionCreate', async (interaction) => {
       for (let i = 1; i < embeds.length; i++) await interaction.followUp({ embeds: [embeds[i]] });
     }
 
-    // /vc-shuffle
-    if (interaction.commandName === 'vc-shuffle') {
+    // /speed-match
+    if (interaction.commandName === 'speed-match') {
       const sub = interaction.options.getSubcommand();
       const guild = interaction.guild; const cfg = ensureVcShuffleGuildConfig(interaction.guildId);
 
       if (sub === 'start') {
-        if (!cfg.lobbyChannelIds.length) return interaction.reply({ content: '❌ Add a lobby channel first with `/vc-shuffle add-lobby`.', flags: MessageFlags.Ephemeral });
+        if (!cfg.lobbyChannelIds.length) return interaction.reply({ content: '❌ Add a lobby channel first with `/speed-match add-lobby`.', flags: MessageFlags.Ephemeral });
         await interaction.deferReply(); await startVcShuffle(guild, interaction.guildId, true);
         const state = shuffleState.get(interaction.guildId);
         const nextIn = state?.nextShuffleAt ? Math.round((state.nextShuffleAt - Date.now()) / 1000 / 60) : '?';
@@ -1540,7 +1540,7 @@ function renderLayout({ title, guildId, currentPath, body, flash, allowedGuildId
     { path: '/',              label: 'Overview' },
     { path: '/camera',        label: 'Camera Policy' },
     { path: '/channel-index', label: 'Channel Index' },
-    { path: '/vc-shuffle',    label: 'VC Shuffle' },
+    { path: '/speed-match',    label: 'Speed Match' },
     { path: '/tos',           label: 'Terms of Service' },
     { path: '/privacy',       label: 'Privacy Policy' },
   ];
@@ -1663,7 +1663,7 @@ app.get('/', async (req, res) => {
         <div class="stat"><div class="num">${poolSize}</div><div class="label">In lobby now</div></div>
         <div class="stat"><div class="num">${shuffleCfg.minIntervalMinutes}m</div><div class="label">Round length</div></div>
         <div class="stat"><div class="num">${shuffleCfg.connectionMode === 'role-based' ? 'Role' : '1-on-1'}</div><div class="label">Mode</div></div>
-      </div><p style="margin-top:12px;"><a href="/vc-shuffle?guild=${guildId}">Configure →</a></p></div>`;
+      </div><p style="margin-top:12px;"><a href="/speed-match?guild=${guildId}">Configure →</a></p></div>`;
   res.send(renderLayout({ title: 'Overview', guildId, currentPath: '/', body, flash: req.query.flash, allowedGuildIds }));
 });
 // Camera Policy dashboard page
@@ -1813,7 +1813,7 @@ app.get('/tos', (req, res) => {
     <div class="prose">
       <p>Welcome to <strong>HIGH-SPEED CONNECTION BOT</strong>. By adding, configuring, or using HIGH-SPEED CONNECTION BOT in a Discord server, you agree to these Terms of Service.</p>
       <h2>1. What HIGH-SPEED CONNECTION BOT Does</h2>
-      <p>HIGH-SPEED CONNECTION BOT is a Discord community-management bot providing: voice-channel camera policy enforcement; camera reminders and configurable grace periods; channel indexing and server-management utilities; and High-Speed Connection voice events (speed-dating style pairing, role-based modes).</p>
+      <p>HIGH-SPEED CONNECTION BOT is a Discord community-management bot providing: voice-channel camera policy enforcement; camera reminders and configurable grace periods; channel indexing and server-management utilities; and High-Speed Connection voice events (speed-match style pairing, role-based modes).</p>
       <h2>2. Discord</h2>
       <p>HIGH-SPEED CONNECTION BOT operates through Discord and is dependent on Discord's services, APIs, and availability. Your use of Discord remains subject to Discord's own Terms of Service and Community Guidelines. HIGH-SPEED CONNECTION BOT is an independent third-party application not owned, operated, endorsed, or sponsored by Discord.</p>
       <h2>3. Server Administrator Responsibility</h2>
@@ -1876,8 +1876,8 @@ app.get('/privacy', (req, res) => {
     </div></div>`;
   res.send(renderLayout({ title: 'Privacy Policy', guildId, currentPath: '/privacy', body, allowedGuildIds }));
 });
-// VC Shuffle dashboard page
-app.get('/vc-shuffle', (req, res) => {
+// Speed Match dashboard page
+app.get('/speed-match', (req, res) => {
   const guildId = resolveGuildId(req); const allowedGuildIds = req.session.allowedGuildIds || [];
   const guild = client.guilds.cache.get(guildId); if (!guild) return res.redirect('/');
   const cfg = ensureVcShuffleGuildConfig(guildId); const state = shuffleState.get(guildId);
@@ -1897,7 +1897,7 @@ app.get('/vc-shuffle', (req, res) => {
   const staffRoleChecklist = roles.map(r => `<label class="check-item"><input type="checkbox" name="staffRoleIds" value="${r.id}" ${(cfg.staffRoleIds || []).includes(r.id) ? 'checked' : ''}> ${escapeHtml(r.name)}</label>`).join('') || '<p class="muted">No roles.</p>';
   const holdingOptions = `<option value="">-- falls back to lobby --</option>` + voiceChannels.map(c => `<option value="${c.id}" ${cfg.holdingChannelId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
   const poolsDisplay = (cfg.pairingPools || []).length
-    ? cfg.pairingPools.map((p, i) => `<div style="background:#0d0d14;border:1px solid var(--panel-border);border-radius:8px;padding:10px;margin-bottom:8px;"><strong>${escapeHtml(p.poolName)}</strong> — pairs with: <em>${p.pairWith === 'self' ? 'each other' : `"${escapeHtml(p.otherPoolName || '')}"`}</em><br><span class="muted">Roles: ${p.roleIds.join(', ')}</span><form method="POST" action="/vc-shuffle/delete-pool" style="display:inline;margin-left:8px;"><input type="hidden" name="guild" value="${guildId}"><input type="hidden" name="poolIndex" value="${i}"><button type="submit" class="danger" style="padding:3px 8px;font-size:12px;">Delete</button></form></div>`).join('')
+    ? cfg.pairingPools.map((p, i) => `<div style="background:#0d0d14;border:1px solid var(--panel-border);border-radius:8px;padding:10px;margin-bottom:8px;"><strong>${escapeHtml(p.poolName)}</strong> — pairs with: <em>${p.pairWith === 'self' ? 'each other' : `"${escapeHtml(p.otherPoolName || '')}"`}</em><br><span class="muted">Roles: ${p.roleIds.join(', ')}</span><form method="POST" action="/speed-match/delete-pool" style="display:inline;margin-left:8px;"><input type="hidden" name="guild" value="${guildId}"><input type="hidden" name="poolIndex" value="${i}"><button type="submit" class="danger" style="padding:3px 8px;font-size:12px;">Delete</button></form></div>`).join('')
     : '<p class="muted">No pools configured yet.</p>';
 
   const body = `
@@ -1912,12 +1912,12 @@ app.get('/vc-shuffle', (req, res) => {
       </div>
       ${cfg.enabled ? `<p class="muted">Next bell at: ${nextIn}</p>` : ''}
       <div class="btn-row">
-        <form method="POST" action="/vc-shuffle/start"><input type="hidden" name="guild" value="${guildId}"><button type="submit" ${cfg.enabled ? 'disabled style="opacity:.5;"' : ''}>▶️ Start</button></form>
-        <form method="POST" action="/vc-shuffle/stop"><input type="hidden" name="guild" value="${guildId}"><button class="danger" type="submit" ${!cfg.enabled ? 'disabled style="opacity:.5;"' : ''}>⏹️ End Session</button></form>
-        <form method="POST" action="/vc-shuffle/shuffle-now"><input type="hidden" name="guild" value="${guildId}"><button class="secondary" type="submit">🔔 Ring Bell Now</button></form>
+        <form method="POST" action="/speed-match/start"><input type="hidden" name="guild" value="${guildId}"><button type="submit" ${cfg.enabled ? 'disabled style="opacity:.5;"' : ''}>▶️ Start</button></form>
+        <form method="POST" action="/speed-match/stop"><input type="hidden" name="guild" value="${guildId}"><button class="danger" type="submit" ${!cfg.enabled ? 'disabled style="opacity:.5;"' : ''}>⏹️ End Session</button></form>
+        <form method="POST" action="/speed-match/shuffle-now"><input type="hidden" name="guild" value="${guildId}"><button class="secondary" type="submit">🔔 Ring Bell Now</button></form>
       </div></div>
 
-    <div class="card"><form method="POST" action="/vc-shuffle/save-settings"><input type="hidden" name="guild" value="${guildId}">
+    <div class="card"><form method="POST" action="/speed-match/save-settings"><input type="hidden" name="guild" value="${guildId}">
       <h3>Round Timing</h3>
       <div class="row">
         <div class="field"><label>Round length min (minutes)</label><input type="number" name="minIntervalMinutes" min="1" max="60" value="${cfg.minIntervalMinutes ?? 3}"></div>
@@ -1945,12 +1945,12 @@ app.get('/vc-shuffle', (req, res) => {
 
     <div class="card"><h3>Holding Channel (for Skip)</h3>
       <p class="muted">When a member clicks ⏭️ Skip, they are moved here silently until the bell rings. Falls back to lobby if not set.</p>
-      <form method="POST" action="/vc-shuffle/save-holding"><input type="hidden" name="guild" value="${guildId}">
+      <form method="POST" action="/speed-match/save-holding"><input type="hidden" name="guild" value="${guildId}">
         <div class="field"><label>Holding voice channel</label><select name="holdingChannelId">${holdingOptions}</select></div>
         <div class="btn-row"><button type="submit">💾 Save Holding Channel</button></div>
       </form></div>
 
-    <div class="card"><form method="POST" action="/vc-shuffle/save-roles"><input type="hidden" name="guild" value="${guildId}">
+    <div class="card"><form method="POST" action="/speed-match/save-roles"><input type="hidden" name="guild" value="${guildId}">
       <h3>Roles</h3>
       <div class="row">
         <div class="field"><label>Participant role</label><select name="participantRoleId">${participantRoleOptions}</select></div>
@@ -1961,7 +1961,7 @@ app.get('/vc-shuffle', (req, res) => {
       <div class="btn-row"><button type="submit">💾 Save Roles</button></div>
     </form></div>
 
-    <div class="card"><form method="POST" action="/vc-shuffle/save-lobbies"><input type="hidden" name="guild" value="${guildId}">
+    <div class="card"><form method="POST" action="/speed-match/save-lobbies"><input type="hidden" name="guild" value="${guildId}">
       <h3>Lobby Channels</h3>
       <div class="checklist">${lobbyChecklist}</div>
       <div class="btn-row"><button type="submit">💾 Save Lobbies</button></div>
@@ -1970,7 +1970,7 @@ app.get('/vc-shuffle', (req, res) => {
     <div class="card"><h3>🎭 Role-Based Pairing Pools</h3>
       <p class="muted">Only used when Connection Mode is <strong>Role-Based</strong>. Define which roles pair together.</p>
       ${poolsDisplay}
-      <form method="POST" action="/vc-shuffle/add-pool"><input type="hidden" name="guild" value="${guildId}">
+      <form method="POST" action="/speed-match/add-pool"><input type="hidden" name="guild" value="${guildId}">
         <h3 style="margin-top:16px;">Add Pairing Pool</h3>
         <div class="row">
           <div class="field"><label>Pool name (e.g. "Girls", "Gay Men")</label><input type="text" name="poolName" placeholder="Pool name"></div>
@@ -1984,13 +1984,13 @@ app.get('/vc-shuffle', (req, res) => {
     <div class="card"><h3>🏗️ Set Up Event Channels</h3>
       <p class="muted">Creates the full channel structure — category, info, matchups, master panel, lobby, holding VC, and 8 cloud rooms.</p>
       <p class="muted">Set up <strong>Participant Role</strong>, <strong>Staff Roles</strong>, and <strong>Bot Role</strong> first — channel permissions are built from those values.</p>
-      <form method="POST" action="/vc-shuffle/setup-channels"><input type="hidden" name="guild" value="${guildId}">
+      <form method="POST" action="/speed-match/setup-channels"><input type="hidden" name="guild" value="${guildId}">
         <div class="btn-row"><button type="submit">🏗️ ${cfg.eventCategoryId ? 'Re-run Setup / Refresh Panel' : 'Create Event Channels'}</button></div>
       </form></div>`;
-  res.send(renderLayout({ title: '💨 High-Speed Connection', guildId, currentPath: '/vc-shuffle', body, flash: req.query.flash, allowedGuildIds }));
+  res.send(renderLayout({ title: '💨 High-Speed Connection', guildId, currentPath: '/speed-match', body, flash: req.query.flash, allowedGuildIds }));
 });
 
-app.post('/vc-shuffle/save-settings', (req, res) => {
+app.post('/speed-match/save-settings', (req, res) => {
   const guildId = req.body.guild; if (!guildId) return res.redirect('/');
   const cfg = ensureVcShuffleGuildConfig(guildId);
   cfg.minIntervalMinutes = Math.max(1, parseInt(req.body.minIntervalMinutes, 10) || 3);
@@ -2002,73 +2002,73 @@ app.post('/vc-shuffle/save-settings', (req, res) => {
   cfg.warningSeconds = Math.min(300, Math.max(5, parseInt(req.body.warningSeconds, 10) || 30));
   cfg.connectionMode = req.body.connectionMode || 'standard';
   saveVcShuffleConfig(vcShuffleConfig);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Settings saved!')}`);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Settings saved!')}`);
 });
-app.post('/vc-shuffle/save-holding', (req, res) => {
+app.post('/speed-match/save-holding', (req, res) => {
   const guildId = req.body.guild; if (!guildId) return res.redirect('/');
   const cfg = ensureVcShuffleGuildConfig(guildId);
   cfg.holdingChannelId = req.body.holdingChannelId || null;
   saveVcShuffleConfig(vcShuffleConfig);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Holding channel saved!')}`);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Holding channel saved!')}`);
 });
-app.post('/vc-shuffle/save-roles', (req, res) => {
+app.post('/speed-match/save-roles', (req, res) => {
   const guildId = req.body.guild; if (!guildId) return res.redirect('/');
   const cfg = ensureVcShuffleGuildConfig(guildId);
   cfg.participantRoleId = req.body.participantRoleId || null;
   cfg.botRoleId = req.body.botRoleId || null;
   cfg.staffRoleIds = asArray(req.body.staffRoleIds);
   saveVcShuffleConfig(vcShuffleConfig);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Roles saved!')}`);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Roles saved!')}`);
 });
-app.post('/vc-shuffle/save-lobbies', (req, res) => {
+app.post('/speed-match/save-lobbies', (req, res) => {
   const guildId = req.body.guild; if (!guildId) return res.redirect('/');
   const cfg = ensureVcShuffleGuildConfig(guildId);
   cfg.lobbyChannelIds = asArray(req.body.lobbyChannelIds);
   saveVcShuffleConfig(vcShuffleConfig);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Lobby channels saved!')}`);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Lobby channels saved!')}`);
 });
-app.post('/vc-shuffle/add-pool', (req, res) => {
+app.post('/speed-match/add-pool', (req, res) => {
   const guildId = req.body.guild; if (!guildId) return res.redirect('/');
   const cfg = ensureVcShuffleGuildConfig(guildId);
   const poolName = (req.body.poolName || '').trim();
   const pairWith = req.body.pairWith || 'self';
   const otherPoolName = (req.body.otherPoolName || '').trim();
   const roleIds = (req.body.roleIds || '').split(',').map(s => s.trim()).filter(Boolean);
-  if (!poolName || !roleIds.length) return res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Pool name and at least one role ID are required.')}`);
+  if (!poolName || !roleIds.length) return res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Pool name and at least one role ID are required.')}`);
   if (!cfg.pairingPools) cfg.pairingPools = [];
   cfg.pairingPools.push({ poolName, pairWith, otherPoolName: pairWith === 'other' ? otherPoolName : '', roleIds });
   saveVcShuffleConfig(vcShuffleConfig);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent(`Pool "${poolName}" added.`)}`);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent(`Pool "${poolName}" added.`)}`);
 });
-app.post('/vc-shuffle/delete-pool', (req, res) => {
+app.post('/speed-match/delete-pool', (req, res) => {
   const guildId = req.body.guild; if (!guildId) return res.redirect('/');
   const cfg = ensureVcShuffleGuildConfig(guildId);
   const idx = parseInt(req.body.poolIndex, 10);
   if (!isNaN(idx) && cfg.pairingPools?.[idx]) cfg.pairingPools.splice(idx, 1);
   saveVcShuffleConfig(vcShuffleConfig);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Pool deleted.')}`);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Pool deleted.')}`);
 });
-app.post('/vc-shuffle/start', async (req, res) => {
+app.post('/speed-match/start', async (req, res) => {
   const guildId = req.body.guild; if (!guildId) return res.redirect('/');
   const guild = client.guilds.cache.get(guildId); const cfg = ensureVcShuffleGuildConfig(guildId);
-  if (!cfg.lobbyChannelIds.length) return res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Add at least one lobby channel first.')}`);
+  if (!cfg.lobbyChannelIds.length) return res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Add at least one lobby channel first.')}`);
   await startVcShuffle(guild, guildId, true);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Session started!')}`);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Session started!')}`);
 });
-app.post('/vc-shuffle/stop', async (req, res) => {
+app.post('/speed-match/stop', async (req, res) => {
   const guildId = req.body.guild; if (!guildId) return res.redirect('/');
   await stopVcShuffle(client.guilds.cache.get(guildId), guildId);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Session stopped. Rooms cleaned up.')}`);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Session stopped. Rooms cleaned up.')}`);
 });
-app.post('/vc-shuffle/shuffle-now', async (req, res) => {
+app.post('/speed-match/shuffle-now', async (req, res) => {
   const guildId = req.body.guild; if (!guildId) return res.redirect('/');
   const guild = client.guilds.cache.get(guildId); const state = shuffleState.get(guildId);
   if (state?.warningTimeoutId) { clearTimeout(state.warningTimeoutId); state.warningTimeoutId = null; }
   await postBellMessage(guild, guildId); await runShuffleRound(guild, guildId); scheduleNextShuffle(guild, guildId);
-  res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Bell rung! Timer reset.')}`);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Bell rung! Timer reset.')}`);
 });
 
-app.post('/vc-shuffle/setup-channels', async (req, res) => {
+app.post('/speed-match/setup-channels', async (req, res) => {
   const guildId = req.body.guild; if (!guildId) return res.redirect('/');
   const guild = client.guilds.cache.get(guildId); const cfg = ensureVcShuffleGuildConfig(guildId);
   const { PermissionFlagsBits: PF } = require('discord.js');
@@ -2120,18 +2120,18 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
       const existing = await infoCh.messages.fetch({ limit: 5 });
       if (!existing.some(m => m.author.id === botId)) {
         const infoEmbed = new EmbedBuilder().setColor(0x8a2be2).setTitle('💨 High-Speed Connection — How It Works')
-          .setDescription(`Welcome to **💨 High-Speed Connection** — speed dating, VC style!\n\n**1. 🚪 Join the lobby**\nHop into <#${lobbyCh.id}>. You're automatically in the pool for the next round.\n\n**2. 💘 Get matched**\nWhen the round starts you'll be moved into a private cloud room with your match.\n\n**3. 🔁 Match Again / ⏭️ Skip**\nButtons appear in your room. Both must vote Match Again to re-pair next round. Hitting Skip moves you to holding silently.\n\n**4. 🔔 The bell rings**\nYou'll get a heads-up before the round ends, then everyone rotates to new rooms.\n\n**5. 🚫 No repeats**\nThe bot remembers who you've already talked to.\n\n**6. 📋 Matchups**\nEach round's pairings are posted in <#${matchupsCh.id}>!`)
+          .setDescription(`Welcome to **💨 High-Speed Connection** — speed match, VC style!\n\n**1. 🚪 Join the lobby**\nHop into <#${lobbyCh.id}>. You're automatically in the pool for the next round.\n\n**2. 💘 Get matched**\nWhen the round starts you'll be moved into a private cloud room with your match.\n\n**3. 🔁 Match Again / ⏭️ Skip**\nButtons appear in your room. Both must vote Match Again to re-pair next round. Hitting Skip moves you to holding silently.\n\n**4. 🔔 The bell rings**\nYou'll get a heads-up before the round ends, then everyone rotates to new rooms.\n\n**5. 🚫 No repeats**\nThe bot remembers who you've already talked to.\n\n**6. 📋 Matchups**\nEach round's pairings are posted in <#${matchupsCh.id}>!`)
           .setFooter({ text: '💨 High-Speed Connection · Managed by HIGH-SPEED CONNECTION BOT' }).setTimestamp();
         await infoCh.send({ embeds: [infoEmbed] });
       }
-    } catch (err) { console.error('[vc-shuffle] info embed:', err.message); }
+    } catch (err) { console.error('[speed-match] info embed:', err.message); }
 
     cfg.staffPanelMessageId = null; saveVcShuffleConfig(vcShuffleConfig);
     await refreshStaffPanel(guild, guildId);
-    res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('✅ All channels created! Check 💨・ᴍᴀsᴛᴇʀ・ᴘᴀɴᴇʟ for the live control panel.')}`);
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('✅ All channels created! Check 💨・ᴍᴀsᴛᴇʀ・ᴘᴀɴᴇʟ for the live control panel.')}`);
   } catch (err) {
-    console.error('[vc-shuffle] setup-channels error:', err);
-    res.redirect(`/vc-shuffle?guild=${guildId}&flash=${encodeURIComponent('Setup failed — ' + err.message)}`);
+    console.error('[speed-match] setup-channels error:', err);
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('Setup failed — ' + err.message)}`);
   }
 });
 
