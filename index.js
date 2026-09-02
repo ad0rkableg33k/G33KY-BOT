@@ -1546,7 +1546,7 @@ function renderLayout({ title, guildId, currentPath, body, flash, allowedGuildId
   ];
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>${escapeHtml(title)} — G33KY Bot Dashboard</title>
+<title>${escapeHtml(title)} — HIGH-SPEED CONNECTION DASHBOARD</title>
 <style>
 :root{--bg:#0d0d12;--panel:#17171f;--panel-border:#2a2a36;--accent:#b83df0;--accent-2:#ff2fb0;--text:#eaeaf2;--text-dim:#9a9aab;--green:#2ecc71;--red:#ff4d6d;}
 *{box-sizing:border-box;}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh;}
@@ -1599,9 +1599,9 @@ app.get('/login', (req, res) => {
   const params = new URLSearchParams({ client_id: DISCORD_CLIENT_ID || '', redirect_uri: REDIRECT_URI, response_type: 'code', scope: 'identify guilds', state });
   const authUrl = `https://discord.com/oauth2/authorize?${params}`;
   res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-  <title>Log in — G33KY Bot Dashboard</title>
+  <title>LOGIN — HIGH-SPEED CONNECTION DASHBOARD</title>
   <style>body{margin:0;background:#0d0d12;color:#eaeaf2;font-family:-apple-system,sans-serif;}.wrap{display:flex;align-items:center;justify-content:center;min-height:100vh;}.card{background:#17171f;border:1px solid #2a2a36;border-radius:14px;padding:32px;width:320px;text-align:center;}h1{background:linear-gradient(90deg,#b83df0,#ff2fb0);-webkit-background-clip:text;background-clip:text;color:transparent;font-size:20px;}p{color:#9a9aab;font-size:14px;margin-bottom:20px;}a.btn{display:block;padding:12px;border-radius:8px;background:#5865F2;color:#fff;font-weight:600;font-size:15px;text-decoration:none;}a.btn:hover{opacity:.9;}</style></head><body>
-  <div class="wrap"><div class="card"><h1>⚙️ G33KY Bot</h1><p>Log in with your Discord account to manage servers where you have administrator access.</p><a href="${authUrl}" class="btn">🔐 Log in with Discord</a></div></div>
+  <div class="wrap"><div class="card"><h1>⚙️HIGH-SPEED CONNECTION BOT</h1><p>Log in with your Discord account to manage servers where you have administrator access.</p><a href="${authUrl}" class="btn">🔐 Log in with Discord</a></div></div>
   </body></html>`);
 });
 
