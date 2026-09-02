@@ -1618,7 +1618,10 @@ app.get('/auth/callback', async (req, res) => {
       .map(g => g.id);
     req.session.userId = user.id; req.session.userTag = user.username;
     req.session.allowedGuildIds = allowedGuildIds; req.session.oauthState = null;
-    res.redirect('/');
+    req.session.save(err => {
+      if (err) { console.error('[auth] session save error:', err); return res.redirect('/login'); }
+      res.redirect('/');
+    });
   } catch (err) { console.error('[auth] callback error:', err); res.redirect('/login'); }
 });
 
