@@ -784,7 +784,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 //  SETUP MENU (/setup command)
 // ===========================================================================
 function buildMainMenuMessage() {
-  const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('⚙️ G33KY Bot Configuration')
+  const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('⚙️ HIGH-SPEED CONNECTION BOT Configuration')
     .setDescription('Select a module to configure below. Everything saves instantly.');
   const moduleSelect = new StringSelectMenuBuilder().setCustomId('setup:main:select').setPlaceholder('Select a module to configure...')
     .addOptions(
@@ -986,7 +986,7 @@ client.on('interactionCreate', async (interaction) => {
 //  SLASH COMMANDS REGISTRATION
 // ===========================================================================
 const commands = [
-  new SlashCommandBuilder().setName('setup').setDescription('Open the G33KY Bot configuration menu').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder().setName('setup').setDescription('Open the HIGH-SPEED CONNECTION BOT configuration menu').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder().setName('help').setDescription('Show all available G33KY Bot commands'),
   new SlashCommandBuilder().setName('botinfo').setDescription('Show info about G33KY Bot'),
   new SlashCommandBuilder().setName('serverinfo').setDescription('Show info about this server'),
@@ -1068,7 +1068,7 @@ client.on('interactionCreate', async (interaction) => {
   try {
     // /help
     if (interaction.commandName === 'help') {
-      const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('⚙️ G33KY Bot — Commands')
+      const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('⚙️ HIGH-SPEED CONNECTION BOT — Commands')
         .addFields(
           { name: '📋 General',              value: '`/help` `/botinfo` `/serverinfo` `/userinfo` `/roleinfo` `/purge`', inline: false },
           { name: '# Channel Index',         value: '`/channel-index` `/export-channels`', inline: false },
@@ -1076,7 +1076,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '💨 High-Speed Connection',value: '`/vc-shuffle start/stop/status/shuffle-now/end-session`\n`/vc-shuffle set-connection-mode` `/vc-shuffle set-holding-channel` and more', inline: false },
           { name: '⚙️ Admin',                value: '`/setup` — interactive config menu', inline: false },
           { name: '📖 Dashboard',            value: 'high-speed-connection.up.railway.app — log in with Discord', inline: false },
-        ).setFooter({ text: 'G33KY Bot · Made with 🖤' });
+        ).setFooter({ text: 'HIGH-SPEED CONNECTION BOT · Made with 🖤' });
       return interaction.reply({ embeds: [embed] });
     }
 
@@ -1085,7 +1085,7 @@ client.on('interactionCreate', async (interaction) => {
       const guilds = client.guilds.cache.size;
       const uptime = process.uptime();
       const hours = Math.floor(uptime / 3600); const minutes = Math.floor((uptime % 3600) / 60);
-      const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('⚙️ G33KY Bot')
+      const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('⚙️ HIGH-SPEED CONNECTION BOT')
         .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
         .addFields(
           { name: 'Bot Tag',         value: client.user.tag,                                       inline: true },
@@ -1094,7 +1094,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Dashboard',       value: 'high-speed-connection.up.railway.app',          inline: false },
           { name: 'Terms of Service',value: 'high-speed-connection.up.railway.app/tos',      inline: true },
           { name: 'Privacy Policy',  value: 'high-speed-connection.up.railway.app/privacy',  inline: true },
-        ).setFooter({ text: 'G33KY Bot · Discord Community Management' }).setTimestamp();
+        ).setFooter({ text: 'HIGH-SPEED CONNECTION BOT · Discord Community Management' }).setTimestamp();
       return interaction.reply({ embeds: [embed] });
     }
 
@@ -1580,7 +1580,7 @@ table input[type=text]{width:100%;}.muted{color:var(--text-dim);font-size:13px;}
 .prose h3{font-size:.95rem;margin-top:1.2rem;color:var(--accent-2);}.prose ul{padding-left:1.4rem;}.prose li{margin:.3rem 0;}
 </style></head><body>
 <header>
-  <h1>⚙️ G33KY Bot</h1>
+  <h1>⚙️ HIGH-SPEED CONNECTION BOT</h1>
   <nav>${navItems.map(n => `<a href="${n.path}?guild=${guildId || ''}" class="${n.path === currentPath ? 'active' : ''}">${n.label}</a>`).join('')}</nav>
   <div class="topright">
     ${guilds.length > 1 ? `<form method="GET" action="${currentPath}"><select name="guild" onchange="this.form.submit()">${guildOptions}</select></form>` : (guilds.length === 1 ? `<span style="color:var(--text-dim);font-size:14px;">${escapeHtml(guilds[0].name)}</span>` : '')}
@@ -1808,28 +1808,28 @@ app.post('/channel-index/save-descriptions', (req, res) => {
 // TOS page
 app.get('/tos', (req, res) => {
   const guildId = resolveGuildId(req); const allowedGuildIds = req.session.allowedGuildIds || [];
-  const body = `<div class="card"><h2>G33KY Bot — Terms of Service</h2>
+  const body = `<div class="card"><h2>HIGH-SPEED CONNECTION BOT — Terms of Service</h2>
     <p class="muted">Effective Date: August 8, 2026 · Last Updated: August 30, 2026</p>
     <div class="prose">
-      <p>Welcome to <strong>G33KY Bot</strong>. By adding, configuring, or using G33KY Bot in a Discord server, you agree to these Terms of Service.</p>
-      <h2>1. What G33KY Bot Does</h2>
-      <p>G33KY Bot is a Discord community-management bot providing: voice-channel camera policy enforcement; camera reminders and configurable grace periods; channel indexing and server-management utilities; and High-Speed Connection voice events (speed-dating style pairing, role-based modes).</p>
+      <p>Welcome to <strong>HIGH-SPEED CONNECTION BOT</strong>. By adding, configuring, or using HIGH-SPEED CONNECTION BOT in a Discord server, you agree to these Terms of Service.</p>
+      <h2>1. What HIGH-SPEED CONNECTION BOT Does</h2>
+      <p>HIGH-SPEED CONNECTION BOT is a Discord community-management bot providing: voice-channel camera policy enforcement; camera reminders and configurable grace periods; channel indexing and server-management utilities; and High-Speed Connection voice events (speed-dating style pairing, role-based modes).</p>
       <h2>2. Discord</h2>
-      <p>G33KY Bot operates through Discord and is dependent on Discord's services, APIs, and availability. Your use of Discord remains subject to Discord's own Terms of Service and Community Guidelines. G33KY Bot is an independent third-party application not owned, operated, endorsed, or sponsored by Discord.</p>
+      <p>HIGH-SPEED CONNECTION BOT operates through Discord and is dependent on Discord's services, APIs, and availability. Your use of Discord remains subject to Discord's own Terms of Service and Community Guidelines. HIGH-SPEED CONNECTION BOT is an independent third-party application not owned, operated, endorsed, or sponsored by Discord.</p>
       <h2>3. Server Administrator Responsibility</h2>
-      <p>Server administrators are responsible for configuring the Bot appropriately; selecting monitored voice channels; configuring exempt roles; establishing appropriate server permissions; and informing server members about applicable server rules and policies. G33KY Bot provides tools for enforcement — it does not determine what rules a server should have.</p>
+      <p>Server administrators are responsible for configuring the Bot appropriately; selecting monitored voice channels; configuring exempt roles; establishing appropriate server permissions; and informing server members about applicable server rules and policies. HIGH-SPEED CONNECTION BOT provides tools for enforcement — it does not determine what rules a server should have.</p>
       <h2>4. Camera Policy</h2>
-      <p>When enabled by a server administrator, G33KY Bot may monitor whether a member's camera is enabled in a designated voice channel. G33KY Bot does <strong>not</strong> record, save, or transmit camera video — it uses Discord's voice-state information only.</p>
+      <p>When enabled by a server administrator, HIGH-SPEED CONNECTION BOT may monitor whether a member's camera is enabled in a designated voice channel. HIGH-SPEED CONNECTION BOT does <strong>not</strong> record, save, or transmit camera video — it uses Discord's voice-state information only.</p>
       <h2>5. High-Speed Connection Events</h2>
-      <p>G33KY Bot can run timed voice-channel pairing events. Session data (pair history, skip history) is stored in memory only and discarded when the session ends. No audio or video is recorded.</p>
+      <p>HIGH-SPEED CONNECTION BOT can run timed voice-channel pairing events. Session data (pair history, skip history) is stored in memory only and discarded when the session ends. No audio or video is recorded.</p>
       <h2>6. Acceptable Use</h2>
-      <p>You agree not to use G33KY Bot to violate applicable laws, harass or target individuals, circumvent Discord security or access controls, or attempt to interfere with the Bot's operation.</p>
+      <p>You agree not to use HIGH-SPEED CONNECTION BOT to violate applicable laws, harass or target individuals, circumvent Discord security or access controls, or attempt to interfere with the Bot's operation.</p>
       <h2>7. Availability</h2>
-      <p>G33KY Bot is provided on an "as is" and "as available" basis. We do not guarantee uninterrupted service, immediate command responses, or that data will never be lost.</p>
+      <p>HIGH-SPEED CONNECTION BOT is provided on an "as is" and "as available" basis. We do not guarantee uninterrupted service, immediate command responses, or that data will never be lost.</p>
       <h2>8. Intellectual Property</h2>
-      <p>G33KY Bot, including its software, branding, and documentation, is owned by G33KY Bot. You may not copy, redistribute, sell, sublicense, or commercially exploit G33KY Bot without authorization.</p>
+      <p>HIGH-SPEED CONNECTION BOT, including its software, branding, and documentation, is owned by HIGH-SPEED CONNECTION BOT. You may not copy, redistribute, sell, sublicense, or commercially exploit HIGH-SPEED CONNECTION BOT without authorization.</p>
       <h2>9. Limitation of Liability</h2>
-      <p>To the maximum extent permitted by applicable law, G33KY Bot will not be liable for indirect, incidental, consequential, special, or punitive damages arising from use or inability to use the Bot.</p>
+      <p>To the maximum extent permitted by applicable law, HIGH-SPEED CONNECTION BOT will not be liable for indirect, incidental, consequential, special, or punitive damages arising from use or inability to use the Bot.</p>
       <h2>10. Changes to These Terms</h2>
       <p>We may update these Terms from time to time. Updated Terms will be posted at <a href="/tos">high-speed-connection.up.railway.app/tos</a>. Continued use constitutes acceptance.</p>
       <h2>11. Contact</h2>
@@ -1841,12 +1841,12 @@ app.get('/tos', (req, res) => {
 // Privacy Policy page
 app.get('/privacy', (req, res) => {
   const guildId = resolveGuildId(req); const allowedGuildIds = req.session.allowedGuildIds || [];
-  const body = `<div class="card"><h2>G33KY Bot — Privacy Policy</h2>
+  const body = `<div class="card"><h2>HIGH-SPEED CONNECTION BOT — Privacy Policy</h2>
     <p class="muted">Effective Date: August 8, 2026 · Last Updated: August 30, 2026</p>
     <div class="prose">
-      <p>This Privacy Policy explains how <strong>G33KY Bot</strong> collects, uses, stores, and protects information when the Bot is used in a Discord server.</p>
+      <p>This Privacy Policy explains how <strong>HIGH-SPEED CONNECTION BOT</strong> collects, uses, stores, and protects information when the Bot is used in a Discord server.</p>
       <h2>1. Information We Collect</h2>
-      <p>G33KY Bot collects only information reasonably necessary to provide its features:</p>
+      <p>HIGH-SPEED CONNECTION BOT collects only information reasonably necessary to provide its features:</p>
       <ul>
         <li>Discord user ID and server/guild ID</li>
         <li>Server membership and role information</li>
@@ -1854,21 +1854,21 @@ app.get('/privacy', (req, res) => {
         <li>Dashboard login information via Discord OAuth2 (username and guild membership) — used only to authenticate you and show the servers you manage</li>
       </ul>
       <h2>2. Information We Do Not Collect</h2>
-      <p>G33KY Bot does <strong>not</strong> collect or store: camera recordings, microphone recordings, audio or video of any kind, message content, passwords, or payment information.</p>
+      <p>HIGH-SPEED CONNECTION BOT does <strong>not</strong> collect or store: camera recordings, microphone recordings, audio or video of any kind, message content, passwords, or payment information.</p>
       <h2>3. High-Speed Connection Session Data</h2>
       <p>During an active High-Speed Connection event, the Bot stores in memory: which members have been paired together (to avoid repeats) and which members have been skipped (to avoid re-pairing). This data exists only for the duration of the session and is discarded when the session ends. It is never written to disk.</p>
       <h2>4. Server Configuration</h2>
-      <p>G33KY Bot stores per-server configuration (camera policy settings, channel index settings, High-Speed Connection settings) in JSON files on a persistent volume. This configuration is stored by server ID and does not contain personal information about individual members.</p>
+      <p>HIGH-SPEED CONNECTION BOT stores per-server configuration (camera policy settings, channel index settings, High-Speed Connection settings) in JSON files on a persistent volume. This configuration is stored by server ID and does not contain personal information about individual members.</p>
       <h2>5. Dashboard OAuth2</h2>
       <p>The dashboard uses Discord OAuth2 to authenticate administrators. When you log in, we receive your Discord username, user ID, and a list of servers you belong to. This information is stored in a server-side session for the duration of your dashboard session only, and is used solely to determine which servers you are permitted to manage. We do not store your Discord credentials.</p>
       <h2>6. Data Storage</h2>
-      <p>Configuration files are stored on a Railway persistent volume. Session data is stored server-side and expires after 7 days of inactivity. If G33KY Bot is hosted on a third-party provider, that provider may have access to infrastructure on which the Bot operates, subject to their own policies.</p>
+      <p>Configuration files are stored on a Railway persistent volume. Session data is stored server-side and expires after 7 days of inactivity. If HIGH-SPEED CONNECTION BOT is hosted on a third-party provider, that provider may have access to infrastructure on which the Bot operates, subject to their own policies.</p>
       <h2>7. Data Retention</h2>
       <p>Server configuration data is retained until the Bot is removed from a server or an administrator clears it. Dashboard session data expires automatically. High-Speed Connection session data is in-memory only and is not retained between sessions.</p>
       <h2>8. Your Privacy Rights</h2>
       <p>Depending on applicable law, you may have rights to request access to, correction of, or deletion of information associated with you. Requests may be sent to <a href="mailto:dragon.exe@atomicmail.io">dragon.exe@atomicmail.io</a>.</p>
       <h2>9. Children's Privacy</h2>
-      <p>G33KY Bot is not specifically directed toward children. You must comply with Discord's age requirements when using Discord and G33KY Bot.</p>
+      <p>HIGH-SPEED CONNECTION BOT is not specifically directed toward children. You must comply with Discord's age requirements when using Discord and HIGH-SPEED CONNECTION BOT.</p>
       <h2>10. Changes to This Policy</h2>
       <p>We may update this Privacy Policy when our practices, features, or legal obligations change. The current version will be available at <a href="/privacy">high-speed-connection.up.railway.app</a>.</p>
       <h2>11. Contact</h2>
@@ -2121,7 +2121,7 @@ app.post('/vc-shuffle/setup-channels', async (req, res) => {
       if (!existing.some(m => m.author.id === botId)) {
         const infoEmbed = new EmbedBuilder().setColor(0x8a2be2).setTitle('💨 High-Speed Connection — How It Works')
           .setDescription(`Welcome to **💨 High-Speed Connection** — speed dating, VC style!\n\n**1. 🚪 Join the lobby**\nHop into <#${lobbyCh.id}>. You're automatically in the pool for the next round.\n\n**2. 💘 Get matched**\nWhen the round starts you'll be moved into a private cloud room with your match.\n\n**3. 🔁 Match Again / ⏭️ Skip**\nButtons appear in your room. Both must vote Match Again to re-pair next round. Hitting Skip moves you to holding silently.\n\n**4. 🔔 The bell rings**\nYou'll get a heads-up before the round ends, then everyone rotates to new rooms.\n\n**5. 🚫 No repeats**\nThe bot remembers who you've already talked to.\n\n**6. 📋 Matchups**\nEach round's pairings are posted in <#${matchupsCh.id}>!`)
-          .setFooter({ text: '💨 High-Speed Connection · Managed by G33KY Bot' }).setTimestamp();
+          .setFooter({ text: '💨 High-Speed Connection · Managed by HIGH-SPEED CONNECTION BOT' }).setTimestamp();
         await infoCh.send({ embeds: [infoEmbed] });
       }
     } catch (err) { console.error('[vc-shuffle] info embed:', err.message); }
