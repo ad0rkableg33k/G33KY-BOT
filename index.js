@@ -1075,7 +1075,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '📷 Camera Policy',        value: '`/camera-policy` `/camera-status` `/camera-monitor` `/camera-exempt-role` `/camera-timing` `/camera-announcement`', inline: false },
           { name: '💨 High-Speed Connection',value: '`/speed-match start/stop/status/shuffle-now/end-session`\n`/speed-match set-connection-mode` `/speed-match set-holding-channel` and more', inline: false },
           { name: '⚙️ Admin',                value: '`/setup` — interactive config menu', inline: false },
-          { name: '📖 Dashboard',            value: 'high-speed-connection.up.railway.app — log in with Discord', inline: false },
+          { name: '📖 Dashboard',            value: 'high-speed-connection-production.up.railway.app — log in with Discord', inline: false },
         ).setFooter({ text: 'HIGH-SPEED CONNECTION BOT · Made with 🖤' });
       return interaction.reply({ embeds: [embed] });
     }
@@ -1091,9 +1091,9 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Bot Tag',         value: client.user.tag,                                       inline: true },
           { name: 'Servers',         value: String(guilds),                                         inline: true },
           { name: 'Uptime',          value: `${hours}h ${minutes}m`,                               inline: true },
-          { name: 'Dashboard',       value: 'high-speed-connection.up.railway.app',          inline: false },
-          { name: 'Terms of Service',value: 'high-speed-connection.up.railway.app/tos',      inline: true },
-          { name: 'Privacy Policy',  value: 'high-speed-connection.up.railway.app/privacy',  inline: true },
+          { name: 'Dashboard',       value: 'high-speed-connection-production.up.railway.app',          inline: false },
+          { name: 'Terms of Service',value: 'high-speed-connection-production.up.railway.app/tos',      inline: true },
+          { name: 'Privacy Policy',  value: 'high-speed-connection-production.up.railway.app/privacy',  inline: true },
         ).setFooter({ text: 'HIGH-SPEED CONNECTION BOT · Discord Community Management' }).setTimestamp();
       return interaction.reply({ embeds: [embed] });
     }
@@ -1494,7 +1494,7 @@ const FileStore = require('session-file-store')(session);
 
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
-const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'high-speed-connection.up.railway.apps';
+const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'https://high-speed-connection-production.up.railway.app';
 const REDIRECT_URI          = `${DASHBOARD_URL}/auth/callback`;
 const SESSION_SECRET        = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const PORT                  = process.env.PORT || 3000;
@@ -1596,7 +1596,7 @@ app.get('/login', (req, res) => {
   if (req.session?.userId) return res.redirect('/');
   const state = crypto.randomBytes(16).toString('hex');
   req.session.oauthState = state;
-  const params = new URLSearchParams({ client_id: DISCORD_CLIENT_ID || '', redirect_uri: REDIRECT_URI, response_type: 'code', scope: 'identify guilds', state });
+  const params = new URLSearchParams({ client_id: 1533481401922355210 || '', redirect_uri: REDIRECT_URI, response_type: 'code', scope: 'identify guilds', state });
   const authUrl = `https://discord.com/oauth2/authorize?${params}`;
   res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
   <title>LOGIN — HIGH-SPEED CONNECTION DASHBOARD</title>
@@ -1831,7 +1831,7 @@ app.get('/tos', (req, res) => {
       <h2>9. Limitation of Liability</h2>
       <p>To the maximum extent permitted by applicable law, HIGH-SPEED CONNECTION BOT will not be liable for indirect, incidental, consequential, special, or punitive damages arising from use or inability to use the Bot.</p>
       <h2>10. Changes to These Terms</h2>
-      <p>We may update these Terms from time to time. Updated Terms will be posted at <a href="/tos">high-speed-connection.up.railway.app/tos</a>. Continued use constitutes acceptance.</p>
+      <p>We may update these Terms from time to time. Updated Terms will be posted at <a href="/tos">high-speed-connection-production.up.railway.app/tos</a>. Continued use constitutes acceptance.</p>
       <h2>11. Contact</h2>
       <p>Questions: <a href="mailto:dragon.exe@atomicmail.io">dragon.exe@atomicmail.io</a></p>
     </div></div>`;
@@ -1870,7 +1870,7 @@ app.get('/privacy', (req, res) => {
       <h2>9. Children's Privacy</h2>
       <p>HIGH-SPEED CONNECTION BOT is not specifically directed toward children. You must comply with Discord's age requirements when using Discord and HIGH-SPEED CONNECTION BOT.</p>
       <h2>10. Changes to This Policy</h2>
-      <p>We may update this Privacy Policy when our practices, features, or legal obligations change. The current version will be available at <a href="/privacy">high-speed-connection.up.railway.app</a>.</p>
+      <p>We may update this Privacy Policy when our practices, features, or legal obligations change. The current version will be available at <a href="/privacy">high-speed-connection-production.up.railway.app</a>.</p>
       <h2>11. Contact</h2>
       <p>Privacy questions: <a href="mailto:dragon.exe@atomicmail.io">dragon.exe@atomicmail.io</a></p>
     </div></div>`;
