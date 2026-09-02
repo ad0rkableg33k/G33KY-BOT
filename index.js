@@ -1596,7 +1596,7 @@ app.get('/login', (req, res) => {
   if (req.session?.userId) return res.redirect('/');
   const state = crypto.randomBytes(16).toString('hex');
   req.session.oauthState = state;
-  const params = new URLSearchParams({ client_id: 1533481401922355210 || '', redirect_uri: REDIRECT_URI, response_type: 'code', scope: 'identify guilds', state });
+  const params = new URLSearchParams({ client_id: DISCORD_CLIENT_ID || '', redirect_uri: REDIRECT_URI, response_type: 'code', scope: 'identify guilds', state });
   const authUrl = `https://discord.com/oauth2/authorize?${params}`;
   res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
   <title>LOGIN — HIGH-SPEED CONNECTION DASHBOARD</title>
