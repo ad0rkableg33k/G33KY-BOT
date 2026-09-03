@@ -1494,7 +1494,7 @@ const FileStore = require('session-file-store')(session);
 
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
-const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'https://high-speed-connection-production.up.railway.app';
+const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'https://high-speed-connection.fly.dev';
 const REDIRECT_URI          = `${DASHBOARD_URL}/auth/callback`;
 const SESSION_SECRET        = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const PORT                  = process.env.PORT || 3000;
