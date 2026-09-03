@@ -1,10 +1,10 @@
-# fly.toml app configuration file generated for high-speed-connection on 2026-09-03T21:43:19Z
+# fly.toml app configuration file generated for high-speed-connection on 2026-09-03T22:05:04Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
 app = 'high-speed-connection'
-primary_region = 'ams'
+primary_region = 'cdg'
 
 [build]
 
