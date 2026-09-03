@@ -21,3 +21,7 @@ primary_region = 'ams'
   cpu_kind = 'shared'
   cpus = 1
   memory_mb = 2048
+
+[mounts]
+  source = "hsc_data"
+  destination = "/data"
