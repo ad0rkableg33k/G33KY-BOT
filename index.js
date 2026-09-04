@@ -1547,7 +1547,7 @@ function renderLayout({ title, guildId, currentPath, body, flash, allowedGuildId
   ];
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>${escapeHtml(title)} — HIGH-SPEED CONNECTION DASHBOARD</title>
+<title>${escapeHtml(title)}HIGH-SPEED CONNECTION DASHBOARD</title>
 <style>
 :root{--bg:#0d0d12;--panel:#17171f;--panel-border:#2a2a36;--accent:#b83df0;--accent-2:#ff2fb0;--text:#eaeaf2;--text-dim:#9a9aab;--green:#2ecc71;--red:#ff4d6d;}
 *{box-sizing:border-box;}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh;}
