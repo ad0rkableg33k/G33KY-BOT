@@ -1075,7 +1075,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '📷 Camera Policy',        value: '`/camera-policy` `/camera-status` `/camera-monitor` `/camera-exempt-role` `/camera-timing` `/camera-announcement`', inline: false },
           { name: '💨 High-Speed Connection',value: '`/speed-match start/stop/status/shuffle-now/end-session`\n`/speed-match set-connection-mode` `/speed-match set-holding-channel` and more', inline: false },
           { name: '⚙️ Admin',                value: '`/setup` — interactive config menu', inline: false },
-          { name: '📖 Dashboard',            value: 'high-speed-connection.fly.dev — log in with Discord', inline: false },
+          { name: '📖 Dashboard',            value: 'high-speed-connection.fly.dev - log in with Discord', inline: false },
         ).setFooter({ text: 'HIGH-SPEED CONNECTION BOT · Made with 🖤' });
       return interaction.reply({ embeds: [embed] });
     }
@@ -1495,7 +1495,7 @@ const FileStore = require('session-file-store')(session);
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const DASHBOARD_URL         = process.env.DASHBOARD_URL || 'https://high-speed-connection.fly.dev';
-const REDIRECT_URI          = `${DASHBOARD_URL}/auth/callback`;
+const REDIRECT_URI          = 'https://high-speed-connection.fly.dev/auth/callback';
 const SESSION_SECRET        = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const PORT                  = process.env.PORT || 3000;
 
@@ -1595,16 +1595,35 @@ table input[type=text]{width:100%;}.muted{color:var(--text-dim);font-size:13px;}
 // Auth routes
 app.get('/login', (req, res) => {
   if (req.session?.userId) return res.redirect('/');
+  
   const state = crypto.randomBytes(16).toString('hex');
   req.session.oauthState = state;
-  const params = new URLSearchParams({ client_id: DISCORD_CLIENT_ID || '', redirect_uri: REDIRECT_URI, response_type: 'code', scope: 'identify guilds', state });
-  const authUrl = `https://discord.com/oauth2/authorize?${params}`;
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-  <title>LOGIN — HIGH-SPEED CONNECTION DASHBOARD</title>
-  <style>body{margin:0;background:#0d0d12;color:#eaeaf2;font-family:-apple-system,sans-serif;}.wrap{display:flex;align-items:center;justify-content:center;min-height:100vh;}.card{background:#17171f;border:1px solid #2a2a36;border-radius:14px;padding:32px;width:320px;text-align:center;}h1{background:linear-gradient(90deg,#b83df0,#ff2fb0);-webkit-background-clip:text;background-clip:text;color:transparent;font-size:20px;}p{color:#9a9aab;font-size:14px;margin-bottom:20px;}a.btn{display:block;padding:12px;border-radius:8px;background:#5865F2;color:#fff;font-weight:600;font-size:15px;text-decoration:none;}a.btn:hover{opacity:.9;}</style></head><body>
-  <div class="wrap"><div class="card"><h1>⚙️HIGH-SPEED CONNECTION BOT</h1><p>Log in with your Discord account to manage servers where you have administrator access.</p><a href="${authUrl}" class="btn">🔐 Log in with Discord</a></div></div>
-  </body></html>`);
+  
+  // Force the session to save BEFORE rendering the page
+  req.session.save((err) => {
+    if (err) {
+      console.error('[auth] session save error:', err);
+      return res.redirect('/login');
+    }
+
+    // Build parameters cleanly
+    const params = new URLSearchParams();
+    params.append('client_id', String(DISCORD_CLIENT_ID || ''));
+    params.append('redirect_uri', String(REDIRECT_URI || ''));
+    params.append('response_type', 'code');
+    params.append('scope', 'identify guilds');
+    params.append('state', state);
+
+    const authUrl = `https://discord.com{params.toString()}`;
+
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>LOGIN — HIGH-SPEED CONNECTION DASHBOARD</title>
+    <style>body{margin:0;background:#0d0d12;color:#eaeaf2;font-family:-apple-system,sans-serif;}.wrap{display:flex;align-items:center;justify-content:center;min-height:100vh;}.card{background:#17171f;border:1px solid #2a2a36;border-radius:14px;padding:32px;width:320px;text-align:center;}h1{background:linear-gradient(90deg,#b83df0,#ff2fb0);-webkit-background-clip:text;background-clip:text;color:transparent;font-size:20px;}p{color:#9a9aab;font-size:14px;margin-bottom:20px;}a.btn{display:block;padding:12px;border-radius:8px;background:#5865F2;color:#fff;font-weight:600;font-size:15px;text-decoration:none;}a.btn:hover{opacity:.9;}</style></head><body>
+    <div class="wrap"><div class="card"><h1>⚙️HIGH-SPEED CONNECTION BOT</h1><p>Log in with your Discord account to manage servers where you have administrator access.</p><a href="${authUrl}" class="btn">🔐 Log in with Discord</a></div></div>
+    </body></html>`);
+  });
 });
+
 
 app.get('/auth/callback', async (req, res) => {
   const { code, state } = req.query;
