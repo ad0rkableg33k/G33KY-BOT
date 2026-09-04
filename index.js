@@ -987,8 +987,8 @@ client.on('interactionCreate', async (interaction) => {
 // ===========================================================================
 const commands = [
   new SlashCommandBuilder().setName('setup').setDescription('Open the HIGH-SPEED CONNECTION BOT configuration menu').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-  new SlashCommandBuilder().setName('help').setDescription('Show all available G33KY Bot commands'),
-  new SlashCommandBuilder().setName('botinfo').setDescription('Show info about G33KY Bot'),
+  new SlashCommandBuilder().setName('help').setDescription('Show all available HIGH-SPEED CONNECTION BOT commands'),
+  new SlashCommandBuilder().setName('botinfo').setDescription('Show info about HIGH-SPEED CONNECTION BOT'),
   new SlashCommandBuilder().setName('serverinfo').setDescription('Show info about this server'),
   new SlashCommandBuilder().setName('channel-index').setDescription('Post a formatted index of all channels in this server')
     .addStringOption(opt => opt.setName('category').setDescription('Only list channels in this category (optional)').setRequired(false)),
