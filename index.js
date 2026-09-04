@@ -849,7 +849,7 @@ client.on('interactionCreate', async (interaction) => {
       const saved = saveCameraConfig(cameraConfig);
       if (!cfg.enabled) clearAllCameraWarningsForGuild(guildId);
       await interaction.update(buildCameraMenuMessage(guildId));
-      if (!saved) await interaction.followUp({ content: '⚠️ Save failed — check Railway logs for DATA_DIR write error.', flags: MessageFlags.Ephemeral });
+      if (!saved) await interaction.followUp({ content: '⚠️ Save failed — check Fly.io logs for DATA_DIR write error.', flags: MessageFlags.Ephemeral });
       return;
     }
     if (id === 'setup:camera:channels:select') {
@@ -1075,7 +1075,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '📷 Camera Policy',        value: '`/camera-policy` `/camera-status` `/camera-monitor` `/camera-exempt-role` `/camera-timing` `/camera-announcement`', inline: false },
           { name: '💨 High-Speed Connection',value: '`/speed-match start/stop/status/shuffle-now/end-session`\n`/speed-match set-connection-mode` `/speed-match set-holding-channel` and more', inline: false },
           { name: '⚙️ Admin',                value: '`/setup` — interactive config menu', inline: false },
-          { name: '📖 Dashboard',            value: 'high-speed-connection-production.up.railway.app — log in with Discord', inline: false },
+          { name: '📖 Dashboard',            value: 'high-speed-connection.fly.dev — log in with Discord', inline: false },
         ).setFooter({ text: 'HIGH-SPEED CONNECTION BOT · Made with 🖤' });
       return interaction.reply({ embeds: [embed] });
     }
@@ -1091,9 +1091,9 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Bot Tag',         value: client.user.tag,                                       inline: true },
           { name: 'Servers',         value: String(guilds),                                         inline: true },
           { name: 'Uptime',          value: `${hours}h ${minutes}m`,                               inline: true },
-          { name: 'Dashboard',       value: 'high-speed-connection-production.up.railway.app',          inline: false },
-          { name: 'Terms of Service',value: 'high-speed-connection-production.up.railway.app/tos',      inline: true },
-          { name: 'Privacy Policy',  value: 'high-speed-connection-production.up.railway.app/privacy',  inline: true },
+          { name: 'Dashboard',       value: 'high-speed-connection.fly.dev',          inline: false },
+          { name: 'Terms of Service',value: 'high-speed-connection.fly.dev/tos',      inline: true },
+          { name: 'Privacy Policy',  value: 'high-speed-connection.fly.dev/privacy',  inline: true },
         ).setFooter({ text: 'HIGH-SPEED CONNECTION BOT · Discord Community Management' }).setTimestamp();
       return interaction.reply({ embeds: [embed] });
     }
@@ -1221,7 +1221,7 @@ client.on('interactionCreate', async (interaction) => {
           warnedUsers.delete(key);
         }
       }
-      const saveWarning = saved ? '' : '\n⚠️ **Save failed** — check Railway logs for DATA_DIR write error.';
+      const saveWarning = saved ? '' : '\n⚠️ **Save failed** — check Fly.io logs for DATA_DIR write error.';
       return interaction.reply({ content: (enabled ? '📷 Camera policy is now **ON**.' : '📴 Camera policy is now **OFF**.') + saveWarning });
     }
 
@@ -1507,10 +1507,11 @@ if (!process.env.SESSION_SECRET)
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.urlencoded({ extended: true, limit: '3mb' }));
+const isProduction = !!process.env.FLY_APP_NAME || process.env.NODE_ENV === 'production';
 app.use(session({
   store: new FileStore({ path: dataPath('sessions'), ttl: 7 * 24 * 60 * 60, retries: 1, logFn: () => {} }),
   secret: SESSION_SECRET, resave: false, saveUninitialized: false,
-  cookie: { httpOnly: true, secure: !!process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production', maxAge: 7 * 24 * 60 * 60 * 1000 },
+  cookie: { httpOnly: true, secure: isProduction, sameSite: 'lax', maxAge: 7 * 24 * 60 * 60 * 1000 },
 }));
 
 async function exchangeCode(code) {
@@ -1834,7 +1835,7 @@ app.get('/tos', (req, res) => {
       <h2>9. Limitation of Liability</h2>
       <p>To the maximum extent permitted by applicable law, HIGH-SPEED CONNECTION BOT will not be liable for indirect, incidental, consequential, special, or punitive damages arising from use or inability to use the Bot.</p>
       <h2>10. Changes to These Terms</h2>
-      <p>We may update these Terms from time to time. Updated Terms will be posted at <a href="/tos">high-speed-connection-production.up.railway.app/tos</a>. Continued use constitutes acceptance.</p>
+      <p>We may update these Terms from time to time. Updated Terms will be posted at <a href="/tos">high-speed-connection.fly.dev/tos</a>. Continued use constitutes acceptance.</p>
       <h2>11. Contact</h2>
       <p>Questions: <a href="mailto:dragon.exe@atomicmail.io">dragon.exe@atomicmail.io</a></p>
     </div></div>`;
@@ -1865,7 +1866,7 @@ app.get('/privacy', (req, res) => {
       <h2>5. Dashboard OAuth2</h2>
       <p>The dashboard uses Discord OAuth2 to authenticate administrators. When you log in, we receive your Discord username, user ID, and a list of servers you belong to. This information is stored in a server-side session for the duration of your dashboard session only, and is used solely to determine which servers you are permitted to manage. We do not store your Discord credentials.</p>
       <h2>6. Data Storage</h2>
-      <p>Configuration files are stored on a Railway persistent volume. Session data is stored server-side and expires after 7 days of inactivity. If HIGH-SPEED CONNECTION BOT is hosted on a third-party provider, that provider may have access to infrastructure on which the Bot operates, subject to their own policies.</p>
+      <p>Configuration files are stored on a Fly.io persistent volume. Session data is stored server-side and expires after 7 days of inactivity. If HIGH-SPEED CONNECTION BOT is hosted on a third-party provider, that provider may have access to infrastructure on which the Bot operates, subject to their own policies.</p>
       <h2>7. Data Retention</h2>
       <p>Server configuration data is retained until the Bot is removed from a server or an administrator clears it. Dashboard session data expires automatically. High-Speed Connection session data is in-memory only and is not retained between sessions.</p>
       <h2>8. Your Privacy Rights</h2>
@@ -1873,7 +1874,7 @@ app.get('/privacy', (req, res) => {
       <h2>9. Children's Privacy</h2>
       <p>HIGH-SPEED CONNECTION BOT is not specifically directed toward children. You must comply with Discord's age requirements when using Discord and HIGH-SPEED CONNECTION BOT.</p>
       <h2>10. Changes to This Policy</h2>
-      <p>We may update this Privacy Policy when our practices, features, or legal obligations change. The current version will be available at <a href="/privacy">high-speed-connection-production.up.railway.app</a>.</p>
+      <p>We may update this Privacy Policy when our practices, features, or legal obligations change. The current version will be available at <a href="/privacy">high-speed-connection.fly.dev</a>.</p>
       <h2>11. Contact</h2>
       <p>Privacy questions: <a href="mailto:dragon.exe@atomicmail.io">dragon.exe@atomicmail.io</a></p>
     </div></div>`;
