@@ -1511,6 +1511,7 @@ const isProduction = !!process.env.FLY_APP_NAME || process.env.NODE_ENV === 'pro
 
 const app = express();
 app.set('trust proxy', 1);
+app.use('/images', express.static(path.join(__dirname, 'images')));
 app.use(express.urlencoded({ extended: true, limit: '3mb' }));
 app.use(express.json({ limit: '3mb' }));
 app.use(session({
