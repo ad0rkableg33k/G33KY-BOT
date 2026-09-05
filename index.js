@@ -1487,10 +1487,736 @@ client.on('error', err => console.error('[discord] client error:', err));
 process.on('unhandledRejection', err => console.error('[process] unhandledRejection:', err));
 // ===========================================================================
 
-// Minimal HTTP server (health check only)
-const PORT = process.env.PORT || 3000;
-const express = require('express');
+
+// ===========================================================================
+//  WEB DASHBOARD — OAuth2 + Express
+// ===========================================================================
+const express   = require('express');
+const session   = require('express-session');
+const FileStore = require('session-file-store')(session);
+
+const PORT             = process.env.PORT || 3000;
+const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
+const SESSION_SECRET         = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const REDIRECT_URI           = process.env.DISCORD_REDIRECT_URI || 'https://high-speed-connection.fly.dev/auth/callback';
+const DASHBOARD_URL          = process.env.DASHBOARD_URL || 'https://high-speed-connection.fly.dev';
+
+if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET)
+  console.warn('[dashboard] DISCORD_CLIENT_ID or DISCORD_CLIENT_SECRET not set — OAuth login will fail.');
+if (!process.env.SESSION_SECRET)
+  console.warn('[dashboard] SESSION_SECRET not set — sessions reset on every restart.');
+
+const isProduction = !!process.env.FLY_APP_NAME || process.env.NODE_ENV === 'production';
+
 const app = express();
+app.set('trust proxy', 1);
+app.use(express.urlencoded({ extended: true, limit: '3mb' }));
+app.use(express.json({ limit: '3mb' }));
+app.use(session({
+  store: new FileStore({ path: dataPath('sessions'), ttl: 7 * 24 * 60 * 60, retries: 1, logFn: () => {} }),
+  secret: SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { httpOnly: true, secure: isProduction, sameSite: 'lax', maxAge: 7 * 24 * 60 * 60 * 1000 },
+}));
+
+// ── helpers ────────────────────────────────────────────────────────────────
+async function exchangeCode(code) {
+  const params = new URLSearchParams({ client_id: DISCORD_CLIENT_ID, client_secret: DISCORD_CLIENT_SECRET, grant_type: 'authorization_code', code, redirect_uri: REDIRECT_URI });
+  const res = await fetch('https://discord.com/api/oauth2/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.toString() });
+  return res.json();
+}
+
+function requireAuth(req, res, next) {
+  if (req.session?.userId) return next();
+  return res.redirect('/login');
+}
+
+function resolveGuildId(req) {
+  const qg = req.query.guild || req.body?.guild;
+  const allowed = req.session?.allowedGuildIds || [];
+  if (qg && allowed.includes(qg)) return qg;
+  return allowed[0] || null;
+}
+
+// ── shared CSS ─────────────────────────────────────────────────────────────
+const DASH_CSS = `
+  <style>
+    :root {
+      --magenta:#FF00FF; --magenta-dim:#cc00cc; --magenta-glow:rgba(255,0,255,0.35);
+      --magenta-faint:rgba(255,0,255,0.08); --bg:#080808; --surface:#111;
+      --surface2:#181818; --border:rgba(255,0,255,0.2); --text:#e0e0e0; --muted:#888;
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+    html{scroll-behavior:smooth;}
+    body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;font-size:15px;line-height:1.6;min-height:100vh;}
+    body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.06) 2px,rgba(0,0,0,0.06) 4px);pointer-events:none;z-index:999;}
+    a{color:var(--magenta);text-decoration:none;}
+    a:hover{text-decoration:underline;}
+    nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;justify-content:space-between;align-items:center;padding:.75rem 2rem;background:rgba(8,8,8,0.9);backdrop-filter:blur(10px);border-bottom:1px solid var(--border);}
+    .nav-logo{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;letter-spacing:.1em;color:var(--magenta);text-shadow:0 0 12px var(--magenta-glow);}
+    .nav-links{display:flex;gap:1.5rem;list-style:none;align-items:center;}
+    .nav-links a{color:var(--muted);font-size:.8rem;font-weight:500;letter-spacing:.05em;text-transform:uppercase;transition:color .2s;}
+    .nav-links a:hover,.nav-links a.active{color:var(--magenta);}
+    .nav-user{font-size:.8rem;color:var(--muted);}
+    .layout{display:flex;padding-top:56px;min-height:100vh;}
+    .sidebar{width:220px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);padding:1.5rem 0;position:sticky;top:56px;height:calc(100vh - 56px);overflow-y:auto;}
+    .sidebar-section{padding:.25rem 1rem .5rem;font-size:.65rem;font-weight:600;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);margin-top:1rem;}
+    .sidebar a{display:block;padding:.5rem 1.25rem;font-size:.85rem;color:var(--muted);border-left:2px solid transparent;transition:all .15s;}
+    .sidebar a:hover,.sidebar a.active{color:var(--magenta);border-left-color:var(--magenta);background:var(--magenta-faint);text-decoration:none;}
+    .main{flex:1;padding:2rem;max-width:900px;}
+    .page-title{font-family:'Bebas Neue',sans-serif;font-size:2rem;letter-spacing:.08em;color:var(--magenta);text-shadow:0 0 20px var(--magenta-glow);margin-bottom:.25rem;}
+    .page-sub{color:var(--muted);font-size:.85rem;margin-bottom:2rem;}
+    .card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1.5rem;margin-bottom:1.25rem;}
+    .card-title{font-size:.7rem;font-weight:600;letter-spacing:.15em;text-transform:uppercase;color:var(--magenta);margin-bottom:1rem;}
+    .form-row{display:flex;flex-direction:column;gap:.4rem;margin-bottom:1rem;}
+    .form-row label{font-size:.8rem;color:var(--muted);font-weight:500;}
+    input[type=text],input[type=number],select,textarea{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:.5rem .75rem;border-radius:4px;font-size:.9rem;width:100%;font-family:inherit;transition:border-color .2s;}
+    input:focus,select:focus,textarea:focus{outline:none;border-color:var(--magenta);}
+    textarea{resize:vertical;min-height:80px;}
+    .btn{display:inline-flex;align-items:center;gap:.4rem;padding:.5rem 1.25rem;border-radius:4px;font-weight:600;font-size:.85rem;cursor:pointer;border:none;transition:all .2s;letter-spacing:.03em;font-family:inherit;}
+    .btn-primary{background:var(--magenta);color:#000;box-shadow:0 0 15px var(--magenta-glow);}
+    .btn-primary:hover{background:#ff33aa;box-shadow:0 0 25px rgba(255,0,255,.6);}
+    .btn-ghost{border:1px solid var(--border);color:var(--text);background:transparent;}
+    .btn-ghost:hover{border-color:var(--magenta);color:var(--magenta);}
+    .btn-danger{background:#c0392b;color:#fff;}
+    .btn-danger:hover{background:#e74c3c;}
+    .toggle{display:flex;align-items:center;gap:.75rem;}
+    .toggle input[type=checkbox]{width:36px;height:20px;appearance:none;background:var(--border);border-radius:10px;cursor:pointer;position:relative;transition:background .2s;flex-shrink:0;}
+    .toggle input[type=checkbox]:checked{background:var(--magenta);}
+    .toggle input[type=checkbox]::after{content:'';position:absolute;width:14px;height:14px;background:#fff;border-radius:50%;top:3px;left:3px;transition:left .2s;}
+    .toggle input[type=checkbox]:checked::after{left:19px;}
+    .toggle label{font-size:.9rem;cursor:pointer;}
+    .flash{padding:.75rem 1rem;border-radius:4px;margin-bottom:1.25rem;font-size:.85rem;}
+    .flash-ok{background:rgba(0,255,100,.08);border:1px solid rgba(0,255,100,.3);color:#00ff64;}
+    .flash-err{background:rgba(255,0,0,.08);border:1px solid rgba(255,0,0,.3);color:#ff6464;}
+    .tag-list{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.5rem;}
+    .tag{background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:.2rem .6rem;font-size:.8rem;display:flex;align-items:center;gap:.4rem;}
+    .tag button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:.9rem;line-height:1;padding:0;}
+    .tag button:hover{color:#ff6464;}
+    table{width:100%;border-collapse:collapse;font-size:.85rem;}
+    th{text-align:left;padding:.5rem .75rem;font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);}
+    td{padding:.6rem .75rem;border-bottom:1px solid rgba(255,0,255,.07);}
+    tr:last-child td{border-bottom:none;}
+    .guild-select{display:flex;align-items:center;gap:.75rem;margin-bottom:1.5rem;}
+    .guild-select select{max-width:280px;}
+    .status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:.4rem;}
+    .status-on{background:#00ff64;}
+    .status-off{background:var(--muted);}
+    @media(max-width:700px){.sidebar{display:none;}.main{padding:1rem;}}
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+`;
+
+function renderLayout({ title, guildId, currentPath, allowedGuildIds, body, username }) {
+  const guildOptions = allowedGuildIds.map(id => {
+    const g = client.guilds.cache.get(id);
+    return `<option value="${id}" ${id === guildId ? 'selected' : ''}>${g ? g.name : id}</option>`;
+  }).join('');
+
+  const navItems = [
+    ['/', 'Overview'],
+    ['/camera', 'Camera Policy'],
+    ['/channel-index', 'Channel Index'],
+    ['/speed-match', 'Speed Match'],
+    ['/sticky', 'Sticky Posts'],
+    ['/autoresponder', 'Auto Responders'],
+    ['/temproles', 'Temp Roles'],
+  ];
+
+  const sidebarLinks = navItems.map(([href, label]) =>
+    `<a href="${href}${guildId ? '?guild='+guildId : ''}" ${currentPath === href ? 'class="active"' : ''}>${label}</a>`
+  ).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>${title} — HSC Dashboard</title>
+<link rel="icon" type="image/gif" href="/images/highspeedpfp.gif">
+${DASH_CSS}
+</head><body>
+<nav>
+  <span class="nav-logo">⚙️ HSC DASHBOARD</span>
+  <ul class="nav-links">
+    <li><a href="https://high-speed-connection.fly.dev" target="_blank">← Site</a></li>
+    <li class="nav-user">👤 ${username || 'Unknown'}</li>
+    <li><a href="/logout">Log out</a></li>
+  </ul>
+</nav>
+<div class="layout">
+  <div class="sidebar">
+    <div class="sidebar-section">Server</div>
+    ${allowedGuildIds.length > 1 ? `<div style="padding:.5rem 1rem;"><select onchange="location.href=window.location.pathname+'?guild='+this.value">${guildOptions}</select></div>` : ''}
+    <div class="sidebar-section">Pages</div>
+    ${sidebarLinks}
+    <div class="sidebar-section">Legal</div>
+    <a href="/tos${guildId ? '?guild='+guildId : ''}">Terms of Service</a>
+    <a href="/privacy${guildId ? '?guild='+guildId : ''}">Privacy Policy</a>
+  </div>
+  <div class="main">
+    ${guildId && allowedGuildIds.length === 1 ? `<div style="font-size:.8rem;color:var(--muted);margin-bottom:1.5rem;">Server: <strong style="color:var(--text)">${client.guilds.cache.get(guildId)?.name || guildId}</strong></div>` : ''}
+    ${body}
+  </div>
+</div>
+</body></html>`;
+}
+
+// ── auth routes ────────────────────────────────────────────────────────────
+app.get('/login', (req, res) => {
+  if (req.session?.userId) return res.redirect('/');
+  const state = crypto.randomBytes(16).toString('hex');
+  req.session.oauthState = state;
+  req.session.save(err => {
+    if (err) { console.error('[auth] session save error:', err); }
+    const params = new URLSearchParams({
+      client_id: DISCORD_CLIENT_ID, redirect_uri: REDIRECT_URI,
+      response_type: 'code', scope: 'identify guilds', state,
+    });
+    const authUrl = `https://discord.com/oauth2/authorize?${params.toString()}`;
+    res.send(`<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Login — HSC Dashboard</title>
+<link rel="icon" type="image/gif" href="/images/highspeedpfp.gif">
+${DASH_CSS}
+</head><body>
+<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem;">
+  <div style="text-align:center;max-width:400px;">
+    <img src="/images/highspeedpfp.gif" style="width:80px;height:80px;border-radius:50%;border:2px solid rgba(255,0,255,.4);box-shadow:0 0 30px rgba(255,0,255,.3);margin-bottom:1.5rem;">
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:2rem;color:var(--magenta);text-shadow:0 0 20px var(--magenta-glow);letter-spacing:.08em;margin-bottom:.5rem;">HIGH-SPEED CONNECTION</div>
+    <div style="color:var(--muted);font-size:.9rem;margin-bottom:2rem;">Log in with Discord to manage servers where you have Administrator access.</div>
+    <a href="${authUrl}" class="btn btn-primary" style="font-size:1rem;padding:.75rem 2rem;">🔐 Log in with Discord</a>
+  </div>
+</div>
+</body></html>`);
+  });
+});
+
+app.get('/auth/callback', async (req, res) => {
+  const { code, state } = req.query;
+  if (!code || state !== req.session.oauthState) {
+    console.warn('[auth] state mismatch or missing code', { state, sessionState: req.session.oauthState });
+    return res.redirect('/login');
+  }
+  try {
+    const tokenData = await exchangeCode(code);
+    if (!tokenData.access_token) { console.error('[auth] no access token:', tokenData); return res.redirect('/login'); }
+    const userRes = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${tokenData.access_token}` } });
+    const user = await userRes.json();
+    const guildsRes = await fetch('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${tokenData.access_token}` } });
+    const guilds = await guildsRes.json();
+    const ADMIN = 0x8;
+    const allowedGuildIds = (Array.isArray(guilds) ? guilds : [])
+      .filter(g => (parseInt(g.permissions) & ADMIN) === ADMIN && client.guilds.cache.has(g.id))
+      .map(g => g.id);
+    req.session.userId = user.id;
+    req.session.userTag = user.username;
+    req.session.allowedGuildIds = allowedGuildIds;
+    req.session.oauthState = null;
+    req.session.save(err => {
+      if (err) { console.error('[auth] session save error:', err); return res.redirect('/login'); }
+      res.redirect('/');
+    });
+  } catch (err) { console.error('[auth] callback error:', err); res.redirect('/login'); }
+});
+
+app.get('/logout', (req, res) => { req.session.destroy(() => res.redirect('/login')); });
 app.get('/health', (req, res) => res.status(200).send('ok'));
-app.listen(PORT, () => { console.log(`[bot] Listening on port ${PORT}`); });
+app.use(requireAuth);
+
+// ── overview ───────────────────────────────────────────────────────────────
+app.get('/', async (req, res) => {
+  const guildId = resolveGuildId(req);
+  const allowedGuildIds = req.session.allowedGuildIds || [];
+  if (!guildId) return res.send(renderLayout({ title: 'Overview', guildId: null, currentPath: '/', allowedGuildIds, username: req.session.userTag,
+    body: `<div class="card"><p>No servers found. Make sure the bot is installed in a server where you have Administrator.</p><p style="margin-top:1rem"><a href="/login">Switch account</a></p></div>` }));
+  const guild = client.guilds.cache.get(guildId);
+  const camCfg = loadCameraConfig()[guildId] || {};
+  const vcCfg  = loadVcShuffleConfig()[guildId] || {};
+  const body = `
+    <div class="page-title">OVERVIEW</div>
+    <div class="page-sub">Welcome back, ${req.session.userTag}</div>
+    <div class="card">
+      <div class="card-title">Server Stats</div>
+      <table>
+        <tr><td>Server</td><td><strong>${guild?.name || guildId}</strong></td></tr>
+        <tr><td>Members</td><td>${guild?.memberCount ?? '—'}</td></tr>
+        <tr><td>Camera Policy</td><td><span class="status-dot ${camCfg.enabled ? 'status-on' : 'status-off'}"></span>${camCfg.enabled ? 'Enabled' : 'Disabled'}</td></tr>
+        <tr><td>Speed Match</td><td><span class="status-dot ${vcCfg.running ? 'status-on' : 'status-off'}"></span>${vcCfg.running ? 'Running' : 'Idle'}</td></tr>
+      </table>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:1rem;">
+      ${[['Camera Policy','/camera'],['Channel Index','/channel-index'],['Speed Match','/speed-match'],['Sticky Posts','/sticky'],['Auto Responders','/autoresponder'],['Temp Roles','/temproles']]
+        .map(([label, href]) => `<a href="${href}?guild=${guildId}" style="text-decoration:none;"><div class="card" style="text-align:center;padding:1.25rem;cursor:pointer;transition:border-color .2s;" onmouseover="this.style.borderColor='var(--magenta)'" onmouseout="this.style.borderColor=''"><div style="font-size:1.5rem;margin-bottom:.5rem">${{'/camera':'📷','/channel-index':'📋','/speed-match':'💨','/sticky':'📌','/autoresponder':'🤖','/temproles':'🎭'}[href]}</div><div style="font-size:.8rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)">${label}</div></div></a>`)
+        .join('')}
+    </div>`;
+  res.send(renderLayout({ title: 'Overview', guildId, currentPath: '/', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+// ── camera policy ─────────────────────────────────────────────────────────
+app.get('/camera', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const allowedGuildIds = req.session.allowedGuildIds || [];
+  if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig()[guildId] || {};
+  const guild = client.guilds.cache.get(guildId);
+  const channels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildVoice) : [];
+  const roles = guild ? [...guild.roles.cache.values()].filter(r => r.id !== guild.id) : [];
+  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const monitored = cfg.monitoredChannels || [];
+  const exempt = cfg.exemptRoleIds || [];
+  const body = `
+    <div class="page-title">CAMERA POLICY</div>
+    <div class="page-sub">Enforce camera-on rules in voice channels.</div>
+    ${flash}
+    <form method="POST" action="/camera/save?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">Status</div>
+        <div class="toggle"><input type="checkbox" id="enabled" name="enabled" ${cfg.enabled ? 'checked' : ''}><label for="enabled">Camera policy enabled</label></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Timing</div>
+        <div class="form-row"><label>Grace period (minutes)</label><input type="number" name="graceMinutes" value="${cfg.graceMinutes ?? 2}" min="0" max="60"></div>
+        <div class="form-row"><label>Warning period (minutes)</label><input type="number" name="warningMinutes" value="${cfg.warningMinutes ?? 3}" min="0" max="60"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Monitored Voice Channels</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;">
+          ${channels.map(c => `<label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;"><input type="checkbox" name="monitoredChannels" value="${c.id}" ${monitored.includes(c.id) ? 'checked' : ''}> ${c.name}</label>`).join('')}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Exempt Roles</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;">
+          ${roles.map(r => `<label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;"><input type="checkbox" name="exemptRoles" value="${r.id}" ${exempt.includes(r.id) ? 'checked' : ''}> ${r.name}</label>`).join('')}
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary">💾 Save Changes</button>
+    </form>`;
+  res.send(renderLayout({ title: 'Camera Policy', guildId, currentPath: '/camera', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+app.post('/camera/save', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig();
+  if (!cfg[guildId]) cfg[guildId] = {};
+  cfg[guildId].enabled = req.body.enabled === 'on';
+  cfg[guildId].graceMinutes = parseInt(req.body.graceMinutes) || 2;
+  cfg[guildId].warningMinutes = parseInt(req.body.warningMinutes) || 3;
+  const mc = req.body.monitoredChannels;
+  cfg[guildId].monitoredChannels = mc ? (Array.isArray(mc) ? mc : [mc]) : [];
+  const er = req.body.exemptRoles;
+  cfg[guildId].exemptRoleIds = er ? (Array.isArray(er) ? er : [er]) : [];
+  saveCameraConfig(cfg);
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Camera policy saved.')}`);
+});
+
+// ── channel index ──────────────────────────────────────────────────────────
+app.get('/channel-index', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const allowedGuildIds = req.session.allowedGuildIds || [];
+  if (!guildId) return res.redirect('/');
+  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const body = `
+    <div class="page-title">CHANNEL INDEX</div>
+    <div class="page-sub">Post a formatted channel index embed to Discord.</div>
+    ${flash}
+    <div class="card">
+      <div class="card-title">Actions</div>
+      <form method="POST" action="/channel-index/post?guild=${guildId}" style="display:flex;gap:.75rem;flex-wrap:wrap;">
+        <button type="submit" class="btn btn-primary">📋 Post Channel Index</button>
+      </form>
+    </div>`;
+  res.send(renderLayout({ title: 'Channel Index', guildId, currentPath: '/channel-index', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+app.post('/channel-index/post', async (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  try {
+    const guild = await client.guilds.fetch(guildId);
+    await exportToFile(guild);
+    res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('✅ Channel index posted.')}`);
+  } catch (err) {
+    res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('❌ Error: ' + err.message)}`);
+  }
+});
+
+// ── speed match ────────────────────────────────────────────────────────────
+app.get('/speed-match', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const allowedGuildIds = req.session.allowedGuildIds || [];
+  if (!guildId) return res.redirect('/');
+  const cfg = (loadVcShuffleConfig()[guildId]) || {};
+  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const body = `
+    <div class="page-title">SPEED MATCH</div>
+    <div class="page-sub">Manage speed matching events. Use Discord slash commands to start/stop.</div>
+    ${flash}
+    <div class="card">
+      <div class="card-title">Current Status</div>
+      <table>
+        <tr><td>Session</td><td><span class="status-dot ${cfg.running ? 'status-on' : 'status-off'}"></span>${cfg.running ? 'Running' : 'Idle'}</td></tr>
+        <tr><td>Connection Mode</td><td>${cfg.connectionMode || 'standard'}</td></tr>
+        <tr><td>Round Duration</td><td>${cfg.roundMinutes || 5} minutes</td></tr>
+        <tr><td>Cloud Rooms</td><td>${cfg.cloudRoomIds?.length || 0} configured</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-title">Slash Commands</div>
+      <div style="color:var(--muted);font-size:.85rem;line-height:2;">
+        <code style="color:var(--magenta)">/speed-match start</code> — Start a session<br>
+        <code style="color:var(--magenta)">/speed-match stop</code> — Stop the session<br>
+        <code style="color:var(--magenta)">/speed-match status</code> — Check session status<br>
+        <code style="color:var(--magenta)">/speed-match shuffle-now</code> — Force a shuffle<br>
+        <code style="color:var(--magenta)">/speed-match end-session</code> — End and post summary
+      </div>
+    </div>`;
+  res.send(renderLayout({ title: 'Speed Match', guildId, currentPath: '/speed-match', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+// ── sticky posts ───────────────────────────────────────────────────────────
+const STICKY_FILE = dataPath('sticky-posts.json');
+function loadSticky() { try { return JSON.parse(fs.readFileSync(STICKY_FILE, 'utf-8')); } catch { return {}; } }
+function saveSticky(d) { fs.writeFileSync(STICKY_FILE, JSON.stringify(d, null, 2)); }
+
+// In-memory: last sticky message per channel
+const stickyLastMsg = {};
+
+client.on('messageCreate', async msg => {
+  if (msg.author.bot) return;
+  const sticky = loadSticky();
+  const gSticky = sticky[msg.guildId];
+  if (!gSticky) return;
+  const entry = gSticky[msg.channelId];
+  if (!entry?.content) return;
+  try {
+    if (stickyLastMsg[msg.channelId]) {
+      const old = await msg.channel.messages.fetch(stickyLastMsg[msg.channelId]).catch(() => null);
+      if (old) await old.delete().catch(() => {});
+    }
+    const sent = await msg.channel.send({ content: `📌 ${entry.content}` });
+    stickyLastMsg[msg.channelId] = sent.id;
+  } catch {}
+});
+
+app.get('/sticky', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const allowedGuildIds = req.session.allowedGuildIds || [];
+  if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  const sticky = loadSticky();
+  const gSticky = sticky[guildId] || {};
+  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const channels = guild ? [...guild.channels.cache.values()].filter(c =>
+    c.type === ChannelType.GuildText || c.type === ChannelType.GuildVoice ||
+    c.type === ChannelType.PublicThread || c.type === ChannelType.GuildForum
+  ).sort((a,b) => a.name.localeCompare(b.name)) : [];
+
+  const existingRows = Object.entries(gSticky).map(([chId, entry]) => {
+    const ch = guild?.channels.cache.get(chId);
+    return `<tr>
+      <td>#${ch?.name || chId}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${entry.content}</td>
+      <td><form method="POST" action="/sticky/delete?guild=${guildId}"><input type="hidden" name="channelId" value="${chId}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">Remove</button></form></td>
+    </tr>`;
+  }).join('');
+
+  const body = `
+    <div class="page-title">STICKY POSTS</div>
+    <div class="page-sub">Messages that re-post themselves at the bottom of a channel whenever someone else sends a message.</div>
+    ${flash}
+    <div class="card">
+      <div class="card-title">Add Sticky Post</div>
+      <form method="POST" action="/sticky/save?guild=${guildId}">
+        <div class="form-row"><label>Channel</label>
+          <select name="channelId"><option value="">— select channel —</option>
+            ${channels.map(c => `<option value="${c.id}">${c.type === ChannelType.GuildVoice ? '🔊' : '#'} ${c.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row"><label>Message content</label><textarea name="content" placeholder="Enter your sticky message..." rows="4"></textarea></div>
+        <button type="submit" class="btn btn-primary">📌 Set Sticky</button>
+      </form>
+    </div>
+    ${existingRows ? `<div class="card"><div class="card-title">Active Sticky Posts</div><table><thead><tr><th>Channel</th><th>Message</th><th></th></tr></thead><tbody>${existingRows}</tbody></table></div>` : ''}`;
+  res.send(renderLayout({ title: 'Sticky Posts', guildId, currentPath: '/sticky', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+app.post('/sticky/save', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const { channelId, content } = req.body;
+  if (!channelId || !content?.trim()) return res.redirect(`/sticky?guild=${guildId}&flash=${encodeURIComponent('❌ Channel and message are required.')}`);
+  const sticky = loadSticky();
+  if (!sticky[guildId]) sticky[guildId] = {};
+  sticky[guildId][channelId] = { content: content.trim() };
+  saveSticky(sticky);
+  res.redirect(`/sticky?guild=${guildId}&flash=${encodeURIComponent('✅ Sticky post saved.')}`);
+});
+
+app.post('/sticky/delete', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const { channelId } = req.body;
+  const sticky = loadSticky();
+  if (sticky[guildId]) delete sticky[guildId][channelId];
+  saveSticky(sticky);
+  res.redirect(`/sticky?guild=${guildId}&flash=${encodeURIComponent('✅ Sticky post removed.')}`);
+});
+
+// ── auto responders ────────────────────────────────────────────────────────
+const AR_FILE = dataPath('autoresponders.json');
+function loadAR() { try { return JSON.parse(fs.readFileSync(AR_FILE, 'utf-8')); } catch { return {}; } }
+function saveAR(d) { fs.writeFileSync(AR_FILE, JSON.stringify(d, null, 2)); }
+
+client.on('messageCreate', async msg => {
+  if (msg.author.bot || !msg.guildId) return;
+  const ar = loadAR();
+  const gAR = ar[msg.guildId];
+  if (!gAR?.length) return;
+  const lower = msg.content.toLowerCase();
+  for (const rule of gAR) {
+    const match = rule.matchType === 'exact'
+      ? lower === rule.trigger.toLowerCase()
+      : lower.includes(rule.trigger.toLowerCase());
+    if (match) {
+      await msg.channel.send(rule.response).catch(() => {});
+      break;
+    }
+  }
+});
+
+app.get('/autoresponder', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const allowedGuildIds = req.session.allowedGuildIds || [];
+  if (!guildId) return res.redirect('/');
+  const ar = loadAR();
+  const gAR = ar[guildId] || [];
+  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const rows = gAR.map((rule, i) => `<tr>
+    <td><code>${rule.trigger}</code></td>
+    <td>${rule.matchType}</td>
+    <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rule.response}</td>
+    <td><form method="POST" action="/autoresponder/delete?guild=${guildId}"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">Remove</button></form></td>
+  </tr>`).join('');
+  const body = `
+    <div class="page-title">AUTO RESPONDERS</div>
+    <div class="page-sub">Bot replies automatically when a trigger word or phrase is detected.</div>
+    ${flash}
+    <div class="card">
+      <div class="card-title">Add Auto Responder</div>
+      <form method="POST" action="/autoresponder/save?guild=${guildId}">
+        <div class="form-row"><label>Trigger phrase</label><input type="text" name="trigger" placeholder="e.g. !rules or when does the event start"></div>
+        <div class="form-row"><label>Match type</label>
+          <select name="matchType">
+            <option value="contains">Contains (trigger appears anywhere in message)</option>
+            <option value="exact">Exact match only</option>
+          </select>
+        </div>
+        <div class="form-row"><label>Response</label><textarea name="response" placeholder="Bot's reply..." rows="3"></textarea></div>
+        <button type="submit" class="btn btn-primary">➕ Add Responder</button>
+      </form>
+    </div>
+    ${rows ? `<div class="card"><div class="card-title">Active Responders</div><table><thead><tr><th>Trigger</th><th>Match</th><th>Response</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}`;
+  res.send(renderLayout({ title: 'Auto Responders', guildId, currentPath: '/autoresponder', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+app.post('/autoresponder/save', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const { trigger, matchType, response } = req.body;
+  if (!trigger?.trim() || !response?.trim()) return res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('❌ Trigger and response are required.')}`);
+  const ar = loadAR();
+  if (!ar[guildId]) ar[guildId] = [];
+  ar[guildId].push({ trigger: trigger.trim(), matchType: matchType || 'contains', response: response.trim() });
+  saveAR(ar);
+  res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('✅ Auto responder added.')}`);
+});
+
+app.post('/autoresponder/delete', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const idx = parseInt(req.body.index);
+  const ar = loadAR();
+  if (ar[guildId]) ar[guildId].splice(idx, 1);
+  saveAR(ar);
+  res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('✅ Auto responder removed.')}`);
+});
+
+// ── temp roles ─────────────────────────────────────────────────────────────
+const TR_FILE = dataPath('temproles.json');
+function loadTR() { try { return JSON.parse(fs.readFileSync(TR_FILE, 'utf-8')); } catch { return {}; } }
+function saveTR(d) { fs.writeFileSync(TR_FILE, JSON.stringify(d, null, 2)); }
+
+// VC join/leave role
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  const tr = loadTR();
+  const guildId = newState.guild.id || oldState.guild.id;
+  const cfg = tr[guildId];
+  if (!cfg?.vcRoleId) return;
+  const guild = newState.guild || oldState.guild;
+
+  // joined a VC
+  if (!oldState.channelId && newState.channelId) {
+    const member = newState.member;
+    if (member) {
+      await member.roles.add(cfg.vcRoleId, 'HSC: joined VC').catch(() => {});
+      // announce if channel went from 0→1
+      if (cfg.announceChannelId && newState.channel?.members.size === 1) {
+        const ch = guild.channels.cache.get(cfg.announceChannelId);
+        if (ch) await ch.send(`🔊 ${newState.channel.name} is now active! ${member} just joined.`).catch(() => {});
+      }
+    }
+  }
+
+  // left a VC
+  if (oldState.channelId && !newState.channelId) {
+    const member = oldState.member;
+    if (member) await member.roles.remove(cfg.vcRoleId, 'HSC: left VC').catch(() => {});
+  }
+});
+
+// Timed button role — track active timers in memory
+const timedRoleTimers = new Map();
+
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isButton()) return;
+  if (!interaction.customId.startsWith('temprole:')) return;
+  const roleId = interaction.customId.replace('temprole:', '');
+  const tr = loadTR();
+  const cfg = tr[interaction.guildId];
+  const rule = cfg?.timedRoles?.find(r => r.roleId === roleId);
+  if (!rule) return await interaction.reply({ content: '❌ Role not found.', ephemeral: true });
+
+  const member = interaction.member;
+  const key = `${interaction.guildId}:${interaction.user.id}:${roleId}`;
+
+  if (timedRoleTimers.has(key)) {
+    return await interaction.reply({ content: `⏳ You already have this role. It will expire automatically.`, ephemeral: true });
+  }
+
+  await member.roles.add(roleId, `HSC: timed role (${rule.durationMinutes}m)`).catch(() => {});
+  await interaction.reply({ content: `✅ You've been given the <@&${roleId}> role for ${rule.durationMinutes} minute(s).`, ephemeral: true });
+
+  const timer = setTimeout(async () => {
+    await member.roles.remove(roleId, 'HSC: timed role expired').catch(() => {});
+    timedRoleTimers.delete(key);
+  }, rule.durationMinutes * 60 * 1000);
+
+  timedRoleTimers.set(key, timer);
+});
+
+app.get('/temproles', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const allowedGuildIds = req.session.allowedGuildIds || [];
+  if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  const tr = loadTR();
+  const cfg = tr[guildId] || {};
+  const roles = guild ? [...guild.roles.cache.values()].filter(r => r.id !== guild.id).sort((a,b) => b.position - a.position) : [];
+  const textChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText) : [];
+  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const timedRows = (cfg.timedRoles || []).map((r, i) => {
+    const role = guild?.roles.cache.get(r.roleId);
+    return `<tr>
+      <td>${role ? `@${role.name}` : r.roleId}</td>
+      <td>${r.durationMinutes} min</td>
+      <td><code>temprole:${r.roleId}</code></td>
+      <td><form method="POST" action="/temproles/timed/delete?guild=${guildId}"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">Remove</button></form></td>
+    </tr>`;
+  }).join('');
+
+  const body = `
+    <div class="page-title">TEMP ROLES</div>
+    <div class="page-sub">VC presence roles and timed button roles.</div>
+    ${flash}
+    <div class="card">
+      <div class="card-title">VC Role — Applied on Join, Removed on Leave</div>
+      <form method="POST" action="/temproles/vc/save?guild=${guildId}">
+        <div class="form-row"><label>Role to apply</label>
+          <select name="vcRoleId">
+            <option value="">— none —</option>
+            ${roles.map(r => `<option value="${r.id}" ${cfg.vcRoleId === r.id ? 'selected' : ''}>@${r.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row"><label>Announce channel (pings when VC goes 0→1 person)</label>
+          <select name="announceChannelId">
+            <option value="">— no announcement —</option>
+            ${textChannels.map(c => `<option value="${c.id}" ${cfg.announceChannelId === c.id ? 'selected' : ''}>#${c.name}</option>`).join('')}
+          </select>
+        </div>
+        <button type="submit" class="btn btn-primary">💾 Save VC Role</button>
+      </form>
+    </div>
+    <div class="card">
+      <div class="card-title">Timed Button Roles</div>
+      <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">Create a role + duration. Then use a button with custom ID <code>temprole:ROLE_ID</code> in any Discord message builder.</p>
+      <form method="POST" action="/temproles/timed/save?guild=${guildId}">
+        <div class="form-row"><label>Role</label>
+          <select name="roleId">
+            <option value="">— select role —</option>
+            ${roles.map(r => `<option value="${r.id}">@${r.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row"><label>Duration (minutes)</label><input type="number" name="durationMinutes" value="30" min="1" max="10080"></div>
+        <button type="submit" class="btn btn-primary">➕ Add Timed Role</button>
+      </form>
+      ${timedRows ? `<div style="margin-top:1.25rem;"><table><thead><tr><th>Role</th><th>Duration</th><th>Button ID</th><th></th></tr></thead><tbody>${timedRows}</tbody></table></div>` : ''}
+    </div>`;
+  res.send(renderLayout({ title: 'Temp Roles', guildId, currentPath: '/temproles', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+app.post('/temproles/vc/save', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const tr = loadTR();
+  if (!tr[guildId]) tr[guildId] = {};
+  tr[guildId].vcRoleId = req.body.vcRoleId || null;
+  tr[guildId].announceChannelId = req.body.announceChannelId || null;
+  saveTR(tr);
+  res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('✅ VC role saved.')}`);
+});
+
+app.post('/temproles/timed/save', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const { roleId, durationMinutes } = req.body;
+  if (!roleId) return res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('❌ Select a role.')}`);
+  const tr = loadTR();
+  if (!tr[guildId]) tr[guildId] = {};
+  if (!tr[guildId].timedRoles) tr[guildId].timedRoles = [];
+  tr[guildId].timedRoles.push({ roleId, durationMinutes: parseInt(durationMinutes) || 30 });
+  saveTR(tr);
+  res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('✅ Timed role added.')}`);
+});
+
+app.post('/temproles/timed/delete', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const idx = parseInt(req.body.index);
+  const tr = loadTR();
+  if (tr[guildId]?.timedRoles) tr[guildId].timedRoles.splice(idx, 1);
+  saveTR(tr);
+  res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('✅ Timed role removed.')}`);
+});
+
+// ── tos / privacy ──────────────────────────────────────────────────────────
+app.get('/tos', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const allowedGuildIds = req.session.allowedGuildIds || [];
+  const body = `<div class="page-title">TERMS OF SERVICE</div><div class="card"><p style="color:var(--muted);font-size:.9rem;line-height:1.8">HIGH-SPEED CONNECTION BOT may be used only in accordance with Discord's Terms of Service. Session data is stored in memory only and discarded when the session ends. No audio or video is recorded. The bot software is owned by HIGH-SPEED CONNECTION BOT. You may not copy, redistribute, sell, sublicense, or commercially exploit it without authorization.</p></div>`;
+  res.send(renderLayout({ title: 'Terms of Service', guildId, currentPath: '/tos', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+app.get('/privacy', (req, res) => {
+  const guildId = resolveGuildId(req);
+  const allowedGuildIds = req.session.allowedGuildIds || [];
+  const body = `<div class="page-title">PRIVACY POLICY</div><div class="card"><p style="color:var(--muted);font-size:.9rem;line-height:1.8">We collect your Discord username and guild membership via OAuth2 solely to authenticate you and show the servers you manage. During an active event, pair/skip history is stored in memory only and discarded when the session ends — never written to disk. Dashboard login info is stored in an encrypted session file and expires after 7 days. We do not sell or share your data with third parties.</p></div>`;
+  res.send(renderLayout({ title: 'Privacy Policy', guildId, currentPath: '/privacy', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+// ── start ──────────────────────────────────────────────────────────────────
+app.listen(PORT, () => { console.log(`[dashboard] Listening on port ${PORT}`); });
 client.login(TOKEN);
