@@ -784,38 +784,123 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 //  SETUP MENU (/setup command)
 // ===========================================================================
 function buildMainMenuMessage() {
-  const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('⚙️ HIGH-SPEED CONNECTION BOT Configuration')
-    .setDescription('Select a module to configure below. Everything saves instantly.');
-  const moduleSelect = new StringSelectMenuBuilder().setCustomId('setup:main:select').setPlaceholder('Select a module to configure...')
+  const embed = new EmbedBuilder().setColor(0x8a2be2).setTitle('⚙️ HIGH-SPEED CONNECTION BOT — Setup')
+    .setDescription('Select a feature to configure. Use the menu below to get started one step at a time.\n\n> **Tip:** Each module walks you through setup step by step. You can return here anytime with `/setup`.');
+  const moduleSelect = new StringSelectMenuBuilder().setCustomId('setup:main:select').setPlaceholder('Choose a feature to set up...')
     .addOptions(
-      { label: 'Camera Policy',  description: 'Cameras-on voice channel policy',             value: 'camera',   emoji: '📷' },
-      { label: 'Channel Index',  description: 'Exclusions & descriptions for /channel-index', value: 'chindex',  emoji: '#️⃣' },
+      { label: 'Camera Policy',    description: 'Enforce cameras-on in voice channels',          value: 'camera',      emoji: '📷' },
+      { label: 'Speed Match',      description: 'Configure speed matching events',               value: 'speedmatch',  emoji: '💨' },
+      { label: 'Temp Roles',       description: 'VC presence roles and timed button roles',      value: 'temproles',   emoji: '🎭' },
+      { label: 'Sticky Notes',     description: 'Messages that re-pin at the bottom of a channel', value: 'sticky',   emoji: '📌' },
+      { label: 'Auto Responder',   description: 'Auto-reply to trigger words or phrases',        value: 'autorespond', emoji: '🤖' },
+      { label: 'Channel Index',    description: 'Exclusions & descriptions for /channel-index',  value: 'chindex',     emoji: '#️⃣' },
     );
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(moduleSelect)] };
 }
 
 function buildCameraMenuMessage(guildId) {
   const cfg = ensureGuildConfig(guildId); const catCount = cfg.monitoredCategoryIds?.length ?? 0;
-  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('📷 Camera Policy Configuration')
+  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('📷 Camera Policy — Setup')
     .setDescription(
       `**Status:** ${cfg.enabled ? '🟢 Enabled' : '🔴 Disabled'}\n` +
       `**Timing:** ${cfg.graceMinutes ?? DEFAULT_GRACE_MINUTES}m grace + ${cfg.warningMinutes ?? DEFAULT_WARNING_MINUTES}m warning\n` +
-      `**Announcement:** ${cfg.announcementUrl ? `[view post](${cfg.announcementUrl})` : 'Not set'}\n` +
+      `**Announcement Channel:** ${cfg.announcementChannelId ? `<#${cfg.announcementChannelId}>` : 'Not set'}\n` +
+      `**Announcement URL:** ${cfg.announcementUrl ? `[view post](${cfg.announcementUrl})` : 'Not set'}\n` +
       `**Monitored Channels:** ${cfg.monitoredChannels.length ? cfg.monitoredChannels.map(id => `<#${id}>`).join(', ') : 'Not set'}\n` +
       `**Monitored Categories:** ${catCount ? cfg.monitoredCategoryIds.map(id => `<#${id}>`).join(', ') : 'Not set'}\n` +
-      `**Exempt Roles:** ${cfg.exemptRoles.length ? cfg.exemptRoles.map(id => `<@&${id}>`).join(', ') : 'Not set'}`
+      `**Exempt Roles:** ${cfg.exemptRoles.length ? cfg.exemptRoles.map(id => `<@&${id}>`).join(', ') : 'Not set'}\n\n` +
+      `> 💡 You can select channels, categories, or both for monitoring.`
     );
   const topRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('setup:camera:toggle').setLabel(cfg.enabled ? 'Disable' : 'Enable').setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('setup:camera:timing').setLabel('Set Timing').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:camera:toggle').setLabel(cfg.enabled ? '🔴 Disable' : '🟢 Enable').setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup:camera:timing').setLabel('⏱ Set Timing').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:camera:announcement').setLabel('📢 Announcement').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('setup:camera:categories-menu').setLabel('🗂 Categories').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
   );
   const channelSelect = new ChannelSelectMenuBuilder().setCustomId('setup:camera:channels:select').setPlaceholder('Select monitored voice channels...').setChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice).setMinValues(0).setMaxValues(25);
   if (cfg.monitoredChannels.length) channelSelect.setDefaultChannels(...cfg.monitoredChannels.slice(0, 25));
+  const announceSelect = new ChannelSelectMenuBuilder().setCustomId('setup:camera:announcechannel:select').setPlaceholder('Select announcement channel (optional)...').setChannelTypes(ChannelType.GuildText).setMinValues(0).setMaxValues(1);
+  if (cfg.announcementChannelId) announceSelect.setDefaultChannels(cfg.announcementChannelId);
   const roleSelect = new RoleSelectMenuBuilder().setCustomId('setup:camera:exempt:select').setPlaceholder('Select exempt role(s)...').setMinValues(0).setMaxValues(25);
   if (cfg.exemptRoles.length) roleSelect.setDefaultRoles(...cfg.exemptRoles.slice(0, 25));
-  return { embeds: [embed], components: [topRow, new ActionRowBuilder().addComponents(channelSelect), new ActionRowBuilder().addComponents(roleSelect)] };
+  return { embeds: [embed], components: [topRow, new ActionRowBuilder().addComponents(channelSelect), new ActionRowBuilder().addComponents(announceSelect), new ActionRowBuilder().addComponents(roleSelect)] };
+}
+
+// Speed Match setup menu
+function buildSpeedMatchMenuMessage(guildId) {
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  const state = shuffleState.get(guildId);
+  const running = cfg.enabled;
+  const nextIn = state?.nextShuffleAt ? `<t:${Math.floor(state.nextShuffleAt / 1000)}:R>` : '—';
+  const modeLabel = cfg.connectionMode === 'role-based' ? 'Role-Based' : (cfg.minGroupSize === 1 ? '1-on-1' : `${cfg.minGroupSize}v${cfg.minGroupSize}`);
+  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('💨 Speed Match — Setup')
+    .setDescription(
+      `**Status:** ${running ? '🟢 Running' : '🔴 Idle'}\n` +
+      `**Mode:** ${modeLabel}\n` +
+      `**Round interval:** ${cfg.minIntervalMinutes}–${cfg.maxIntervalMinutes} min\n` +
+      `**Next bell:** ${running ? nextIn : '—'}\n` +
+      `**Lobbies:** ${cfg.lobbyChannelIds?.length ? cfg.lobbyChannelIds.map(id => `<#${id}>`).join(', ') : 'Not set'}\n` +
+      `**Event category:** ${cfg.eventCategoryId ? `<#${cfg.eventCategoryId}>` : 'Not set'}\n` +
+      `**Matchups channel:** ${cfg.matchupsChannelId ? `<#${cfg.matchupsChannelId}>` : 'Not set'}\n` +
+      `**Staff panel channel:** ${cfg.staffPanelChannelId ? `<#${cfg.staffPanelChannelId}>` : 'Not set'}`
+    );
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup:sm:start').setLabel('▶️ Start').setStyle(ButtonStyle.Success).setDisabled(running),
+    new ButtonBuilder().setCustomId('setup:sm:bell').setLabel('🔔 Next Round').setStyle(ButtonStyle.Primary).setDisabled(!running),
+    new ButtonBuilder().setCustomId('setup:sm:stop').setLabel('⏹ End Session').setStyle(ButtonStyle.Danger).setDisabled(!running),
+    new ButtonBuilder().setCustomId('setup:sm:setinterval').setLabel('⏱ Set Interval').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
+  );
+  const lobbySelect = new ChannelSelectMenuBuilder().setCustomId('setup:sm:lobby:select').setPlaceholder('Set lobby voice channel(s)...').setChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice).setMinValues(0).setMaxValues(5);
+  if (cfg.lobbyChannelIds?.length) lobbySelect.setDefaultChannels(...cfg.lobbyChannelIds.slice(0, 5));
+  const matchupsSelect = new ChannelSelectMenuBuilder().setCustomId('setup:sm:matchups:select').setPlaceholder('Set matchups/announcements text channel...').setChannelTypes(ChannelType.GuildText).setMinValues(0).setMaxValues(1);
+  if (cfg.matchupsChannelId) matchupsSelect.setDefaultChannels(cfg.matchupsChannelId);
+  const staffPanelSelect = new ChannelSelectMenuBuilder().setCustomId('setup:sm:staffpanel:select').setPlaceholder('Set staff panel channel (staff only)...').setChannelTypes(ChannelType.GuildText).setMinValues(0).setMaxValues(1);
+  if (cfg.staffPanelChannelId) staffPanelSelect.setDefaultChannels(cfg.staffPanelChannelId);
+  return { embeds: [embed], components: [row1, new ActionRowBuilder().addComponents(lobbySelect), new ActionRowBuilder().addComponents(matchupsSelect), new ActionRowBuilder().addComponents(staffPanelSelect)] };
+}
+
+// Temp Roles setup menu
+function buildTempRolesMenuMessage(guildId) {
+  const tr = (() => { try { const fs2 = require('fs'); const p = require('path'); return JSON.parse(fs2.readFileSync(p.join(process.env.DATA_DIR || '.', 'temproles.json'), 'utf-8')); } catch { return {}; } })();
+  const cfg = tr[guildId] || {};
+  const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('🎭 Temp Roles — Setup')
+    .setDescription(
+      `**VC Role:** ${cfg.vcRoleId ? `<@&${cfg.vcRoleId}>` : 'Not set'}\n` +
+      `**VC Announce Channel:** ${cfg.announceChannelId ? `<#${cfg.announceChannelId}>` : 'Not set'}\n` +
+      `**VC Text Channel:** ${cfg.vcTextChannelId ? `<#${cfg.vcTextChannelId}>` : 'Not set'}\n` +
+      `**Timed Roles:** ${cfg.timedRoles?.length ? cfg.timedRoles.map(r => `<@&${r.roleId}> (${r.durationMinutes}m)`).join(', ') : 'None configured'}\n\n` +
+      `> **VC Role** is applied when a member enters any voice channel, removed on leave.\n> **Timed Roles** are given via a button click and expire automatically.`
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup:tr:vcconfig').setLabel('🔊 Set VC Role').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:tr:addtimed').setLabel('⏱ Add Timed Role').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:tr:postbutton').setLabel('📤 Post Button').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [row] };
+}
+
+// Sticky/Auto Responder setup menu
+function buildStickyARMenuMessage(guildId, mode = 'sticky') {
+  const isAR = mode === 'autorespond';
+  const embed = new EmbedBuilder().setColor(0x2b2d31)
+    .setTitle(isAR ? '🤖 Auto Responder — Setup' : '📌 Sticky Notes — Setup')
+    .setDescription(
+      isAR
+        ? 'Auto responders reply automatically when a trigger word or phrase is detected in any message.\n\n' +
+          'Use the Dashboard for full management: **high-speed-connection.fly.dev**\n\n' +
+          '> Click below to configure a new auto responder.'
+        : 'Sticky notes re-post themselves at the bottom of a channel whenever someone sends a message.\n\n' +
+          'Use the Dashboard for full management: **high-speed-connection.fly.dev**\n\n' +
+          '> Click below to configure a new sticky note.'
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(isAR ? 'setup:ar:add' : 'setup:sticky:add').setLabel(isAR ? '➕ Add Auto Responder' : '➕ Add Sticky Note').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup:main').setLabel('⬅ Back').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [row] };
 }
 
 function buildCameraCategoriesMenuMessage(guildId) {
@@ -836,12 +921,20 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.isButton() && !interaction.isRoleSelectMenu() && !interaction.isChannelSelectMenu() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()) return;
 
     const guildId = interaction.guildId; const id = interaction.customId;
+
+    // ── Main menu ──────────────────────────────────────────────────────────
     if (id === 'setup:main') return interaction.update(buildMainMenuMessage());
     if (id === 'setup:main:select') {
       const choice = interaction.values[0];
-      if (choice === 'camera') return interaction.update(buildCameraMenuMessage(guildId));
+      if (choice === 'camera')      return interaction.update(buildCameraMenuMessage(guildId));
+      if (choice === 'speedmatch')  return interaction.update(buildSpeedMatchMenuMessage(guildId));
+      if (choice === 'temproles')   return interaction.update(buildTempRolesMenuMessage(guildId));
+      if (choice === 'sticky')      return interaction.update(buildStickyARMenuMessage(guildId, 'sticky'));
+      if (choice === 'autorespond') return interaction.update(buildStickyARMenuMessage(guildId, 'autorespond'));
       return;
     }
+
+    // ── Camera Policy ──────────────────────────────────────────────────────
     if (id === 'setup:camera:menu')            return interaction.update(buildCameraMenuMessage(guildId));
     if (id === 'setup:camera:categories-menu') return interaction.update(buildCameraCategoriesMenuMessage(guildId));
     if (id === 'setup:camera:toggle') {
@@ -854,6 +947,10 @@ client.on('interactionCreate', async (interaction) => {
     }
     if (id === 'setup:camera:channels:select') {
       ensureGuildConfig(guildId).monitoredChannels = interaction.values;
+      saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId));
+    }
+    if (id === 'setup:camera:announcechannel:select') {
+      ensureGuildConfig(guildId).announcementChannelId = interaction.values[0] || null;
       saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId));
     }
     if (id === 'setup:camera:categories:select') {
@@ -872,6 +969,13 @@ client.on('interactionCreate', async (interaction) => {
       modal.addComponents(new ActionRowBuilder().addComponents(graceInput), new ActionRowBuilder().addComponents(warningInput));
       return interaction.showModal(modal);
     }
+    if (id === 'setup:camera:announcement') {
+      const cfg = ensureGuildConfig(guildId);
+      const modal = new ModalBuilder().setCustomId('setup:camera:announcement:modal').setTitle('Camera Policy Announcement URL');
+      const urlInput = new TextInputBuilder().setCustomId('url').setLabel('Announcement message link (optional)').setStyle(TextInputStyle.Short).setValue(cfg.announcementUrl || '').setRequired(false).setPlaceholder('https://discord.com/channels/.../...');
+      modal.addComponents(new ActionRowBuilder().addComponents(urlInput));
+      return interaction.showModal(modal);
+    }
     if (id === 'setup:camera:timing:modal') {
       const grace = parseInt(interaction.fields.getTextInputValue('grace'), 10);
       const warning = parseInt(interaction.fields.getTextInputValue('warning'), 10);
@@ -880,6 +984,188 @@ client.on('interactionCreate', async (interaction) => {
       const cfg = ensureGuildConfig(guildId); cfg.graceMinutes = grace; cfg.warningMinutes = warning;
       saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId));
     }
+    if (id === 'setup:camera:announcement:modal') {
+      const url = interaction.fields.getTextInputValue('url')?.trim() || null;
+      ensureGuildConfig(guildId).announcementUrl = url || null;
+      saveCameraConfig(cameraConfig); return interaction.update(buildCameraMenuMessage(guildId));
+    }
+
+    // ── Speed Match ────────────────────────────────────────────────────────
+    if (id === 'setup:sm:menu') return interaction.update(buildSpeedMatchMenuMessage(guildId));
+    if (id === 'setup:sm:lobby:select') {
+      const cfg = ensureVcShuffleGuildConfig(guildId);
+      cfg.lobbyChannelIds = interaction.values; saveVcShuffleConfig(vcShuffleConfig);
+      return interaction.update(buildSpeedMatchMenuMessage(guildId));
+    }
+    if (id === 'setup:sm:matchups:select') {
+      const cfg = ensureVcShuffleGuildConfig(guildId);
+      cfg.matchupsChannelId = interaction.values[0] || null; saveVcShuffleConfig(vcShuffleConfig);
+      return interaction.update(buildSpeedMatchMenuMessage(guildId));
+    }
+    if (id === 'setup:sm:staffpanel:select') {
+      const cfg = ensureVcShuffleGuildConfig(guildId);
+      cfg.staffPanelChannelId = interaction.values[0] || null;
+      cfg.staffPanelMessageId = null; // reset so it re-posts
+      saveVcShuffleConfig(vcShuffleConfig);
+      return interaction.update(buildSpeedMatchMenuMessage(guildId));
+    }
+    if (id === 'setup:sm:setinterval') {
+      const modal = new ModalBuilder().setCustomId('setup:sm:interval:modal').setTitle('Speed Match — Round Interval');
+      const minInput = new TextInputBuilder().setCustomId('min').setLabel('Min minutes per round').setStyle(TextInputStyle.Short).setValue(String(ensureVcShuffleGuildConfig(guildId).minIntervalMinutes ?? 3)).setRequired(true);
+      const maxInput = new TextInputBuilder().setCustomId('max').setLabel('Max minutes per round').setStyle(TextInputStyle.Short).setValue(String(ensureVcShuffleGuildConfig(guildId).maxIntervalMinutes ?? 3)).setRequired(true);
+      modal.addComponents(new ActionRowBuilder().addComponents(minInput), new ActionRowBuilder().addComponents(maxInput));
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:sm:interval:modal') {
+      const min = parseInt(interaction.fields.getTextInputValue('min'), 10);
+      const max = parseInt(interaction.fields.getTextInputValue('max'), 10);
+      if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max < min)
+        return interaction.reply({ content: '❌ Min must be 1+ and max must be ≥ min.', flags: MessageFlags.Ephemeral });
+      const cfg = ensureVcShuffleGuildConfig(guildId);
+      cfg.minIntervalMinutes = min; cfg.maxIntervalMinutes = max; saveVcShuffleConfig(vcShuffleConfig);
+      return interaction.update(buildSpeedMatchMenuMessage(guildId));
+    }
+    if (id === 'setup:sm:start') {
+      const guild = interaction.guild; const cfg = ensureVcShuffleGuildConfig(guildId);
+      if (!cfg.lobbyChannelIds?.length) return interaction.reply({ content: '❌ Set a lobby channel first using the menu below.', flags: MessageFlags.Ephemeral });
+      await interaction.deferUpdate();
+      await startVcShuffle(guild, guildId, true);
+      return interaction.editReply(buildSpeedMatchMenuMessage(guildId));
+    }
+    if (id === 'setup:sm:bell') {
+      const guild = interaction.guild; const state = shuffleState.get(guildId);
+      if (state?.warningTimeoutId) { clearTimeout(state.warningTimeoutId); state.warningTimeoutId = null; }
+      await interaction.deferUpdate();
+      await postBellMessage(guild, guildId); await runShuffleRound(guild, guildId); scheduleNextShuffle(guild, guildId);
+      await refreshStaffPanel(guild, guildId);
+      return interaction.editReply(buildSpeedMatchMenuMessage(guildId));
+    }
+    if (id === 'setup:sm:stop') {
+      const guild = interaction.guild;
+      await interaction.deferUpdate();
+      await stopVcShuffle(guild, guildId);
+      return interaction.editReply(buildSpeedMatchMenuMessage(guildId));
+    }
+
+    // ── Temp Roles ─────────────────────────────────────────────────────────
+    if (id === 'setup:tr:menu') return interaction.update(buildTempRolesMenuMessage(guildId));
+    if (id === 'setup:tr:vcconfig') {
+      const modal = new ModalBuilder().setCustomId('setup:tr:vcconfig:modal').setTitle('VC Role — Config');
+      const roleInput = new TextInputBuilder().setCustomId('roleId').setLabel('Role ID to apply on VC join').setStyle(TextInputStyle.Short).setRequired(false).setPlaceholder('Right-click role → Copy ID');
+      const chanInput = new TextInputBuilder().setCustomId('announceChannelId').setLabel('Announcement channel ID (optional)').setStyle(TextInputStyle.Short).setRequired(false).setPlaceholder('Right-click channel → Copy ID');
+      const vcTextInput = new TextInputBuilder().setCustomId('vcTextChannelId').setLabel('VC text channel ID (optional)').setStyle(TextInputStyle.Short).setRequired(false).setPlaceholder('Right-click channel → Copy ID');
+      const msgInput = new TextInputBuilder().setCustomId('announceMsg').setLabel('Custom announcement message (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false).setPlaceholder('{user} joined {channel}!');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(roleInput),
+        new ActionRowBuilder().addComponents(chanInput),
+        new ActionRowBuilder().addComponents(vcTextInput),
+        new ActionRowBuilder().addComponents(msgInput),
+      );
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:tr:vcconfig:modal') {
+      const trData = (() => { try { const fs2 = require('fs'); const p = require('path'); return JSON.parse(fs2.readFileSync(p.join(process.env.DATA_DIR || '.', 'temproles.json'), 'utf-8')); } catch { return {}; } })();
+      if (!trData[guildId]) trData[guildId] = {};
+      const roleId = interaction.fields.getTextInputValue('roleId')?.trim() || null;
+      const announceChannelId = interaction.fields.getTextInputValue('announceChannelId')?.trim() || null;
+      const vcTextChannelId = interaction.fields.getTextInputValue('vcTextChannelId')?.trim() || null;
+      const announceMsg = interaction.fields.getTextInputValue('announceMsg')?.trim() || null;
+      if (roleId) trData[guildId].vcRoleId = roleId;
+      if (announceChannelId) trData[guildId].announceChannelId = announceChannelId;
+      if (vcTextChannelId) trData[guildId].vcTextChannelId = vcTextChannelId;
+      if (announceMsg) trData[guildId].announceMsg = announceMsg;
+      try { const fs2 = require('fs'); const p = require('path'); fs2.writeFileSync(p.join(process.env.DATA_DIR || '.', 'temproles.json'), JSON.stringify(trData, null, 2)); } catch {}
+      return interaction.update(buildTempRolesMenuMessage(guildId));
+    }
+    if (id === 'setup:tr:addtimed') {
+      const modal = new ModalBuilder().setCustomId('setup:tr:addtimed:modal').setTitle('Add Timed Role');
+      const roleInput = new TextInputBuilder().setCustomId('roleId').setLabel('Role ID').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click role → Copy ID');
+      const durInput = new TextInputBuilder().setCustomId('duration').setLabel('Duration (minutes)').setStyle(TextInputStyle.Short).setRequired(true).setValue('30');
+      modal.addComponents(new ActionRowBuilder().addComponents(roleInput), new ActionRowBuilder().addComponents(durInput));
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:tr:addtimed:modal') {
+      const trData = (() => { try { const fs2 = require('fs'); const p = require('path'); return JSON.parse(fs2.readFileSync(p.join(process.env.DATA_DIR || '.', 'temproles.json'), 'utf-8')); } catch { return {}; } })();
+      if (!trData[guildId]) trData[guildId] = {};
+      if (!trData[guildId].timedRoles) trData[guildId].timedRoles = [];
+      const roleId = interaction.fields.getTextInputValue('roleId')?.trim();
+      const duration = parseInt(interaction.fields.getTextInputValue('duration'), 10) || 30;
+      if (!roleId) return interaction.reply({ content: '❌ Role ID is required.', flags: MessageFlags.Ephemeral });
+      trData[guildId].timedRoles.push({ roleId, durationMinutes: duration });
+      try { const fs2 = require('fs'); const p = require('path'); fs2.writeFileSync(p.join(process.env.DATA_DIR || '.', 'temproles.json'), JSON.stringify(trData, null, 2)); } catch {}
+      return interaction.update(buildTempRolesMenuMessage(guildId));
+    }
+    if (id === 'setup:tr:postbutton') {
+      const modal = new ModalBuilder().setCustomId('setup:tr:postbutton:modal').setTitle('Post Timed Role Button');
+      const roleInput = new TextInputBuilder().setCustomId('roleId').setLabel('Role ID for the button').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click role → Copy ID');
+      const chanInput = new TextInputBuilder().setCustomId('channelId').setLabel('Channel ID to post button in').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click channel → Copy ID');
+      const labelInput = new TextInputBuilder().setCustomId('label').setLabel('Button label').setStyle(TextInputStyle.Short).setRequired(false).setValue('Get Role');
+      const msgInput = new TextInputBuilder().setCustomId('message').setLabel('Message above the button (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false).setPlaceholder('Click the button below to get your temporary role!');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(roleInput),
+        new ActionRowBuilder().addComponents(chanInput),
+        new ActionRowBuilder().addComponents(labelInput),
+        new ActionRowBuilder().addComponents(msgInput),
+      );
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:tr:postbutton:modal') {
+      const roleId = interaction.fields.getTextInputValue('roleId')?.trim();
+      const channelId = interaction.fields.getTextInputValue('channelId')?.trim();
+      const label = interaction.fields.getTextInputValue('label')?.trim() || 'Get Role';
+      const message = interaction.fields.getTextInputValue('message')?.trim() || null;
+      const guild = interaction.guild;
+      const ch = guild.channels.cache.get(channelId);
+      if (!ch) return interaction.reply({ content: '❌ Channel not found. Check the ID.', flags: MessageFlags.Ephemeral });
+      const btn = new ButtonBuilder().setCustomId(`temprole:${roleId}`).setLabel(label).setStyle(ButtonStyle.Primary);
+      const row = new ActionRowBuilder().addComponents(btn);
+      await ch.send({ content: message || undefined, components: [row] });
+      await interaction.reply({ content: `✅ Button posted in <#${channelId}>!`, flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    // ── Sticky Notes ───────────────────────────────────────────────────────
+    if (id === 'setup:sticky:add') {
+      const modal = new ModalBuilder().setCustomId('setup:sticky:add:modal').setTitle('Add Sticky Note');
+      const chanInput = new TextInputBuilder().setCustomId('channelId').setLabel('Channel ID').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click channel → Copy ID');
+      const msgInput = new TextInputBuilder().setCustomId('content').setLabel('Sticky message content').setStyle(TextInputStyle.Paragraph).setRequired(true).setPlaceholder('Your sticky message here...');
+      modal.addComponents(new ActionRowBuilder().addComponents(chanInput), new ActionRowBuilder().addComponents(msgInput));
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:sticky:add:modal') {
+      const channelId = interaction.fields.getTextInputValue('channelId')?.trim();
+      const content = interaction.fields.getTextInputValue('content')?.trim();
+      if (!channelId || !content) return interaction.reply({ content: '❌ Channel ID and message are required.', flags: MessageFlags.Ephemeral });
+      const sticky = (() => { try { const fs2 = require('fs'); const p = require('path'); return JSON.parse(fs2.readFileSync(p.join(process.env.DATA_DIR || '.', 'sticky-posts.json'), 'utf-8')); } catch { return {}; } })();
+      if (!sticky[guildId]) sticky[guildId] = {};
+      sticky[guildId][channelId] = { content };
+      try { const fs2 = require('fs'); const p = require('path'); fs2.writeFileSync(p.join(process.env.DATA_DIR || '.', 'sticky-posts.json'), JSON.stringify(sticky, null, 2)); } catch {}
+      await interaction.reply({ content: `✅ Sticky note set for <#${channelId}>!`, flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    // ── Auto Responder ─────────────────────────────────────────────────────
+    if (id === 'setup:ar:add') {
+      const modal = new ModalBuilder().setCustomId('setup:ar:add:modal').setTitle('Add Auto Responder');
+      const triggerInput = new TextInputBuilder().setCustomId('trigger').setLabel('Trigger phrase').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('e.g. !rules or when does the event start');
+      const typeInput = new TextInputBuilder().setCustomId('matchType').setLabel('Match type: "contains" or "exact"').setStyle(TextInputStyle.Short).setRequired(true).setValue('contains');
+      const respInput = new TextInputBuilder().setCustomId('response').setLabel('Response message').setStyle(TextInputStyle.Paragraph).setRequired(true).setPlaceholder('Bot reply here...');
+      modal.addComponents(new ActionRowBuilder().addComponents(triggerInput), new ActionRowBuilder().addComponents(typeInput), new ActionRowBuilder().addComponents(respInput));
+      return interaction.showModal(modal);
+    }
+    if (id === 'setup:ar:add:modal') {
+      const trigger = interaction.fields.getTextInputValue('trigger')?.trim();
+      const matchType = interaction.fields.getTextInputValue('matchType')?.trim().toLowerCase() === 'exact' ? 'exact' : 'contains';
+      const response = interaction.fields.getTextInputValue('response')?.trim();
+      if (!trigger || !response) return interaction.reply({ content: '❌ Trigger and response are required.', flags: MessageFlags.Ephemeral });
+      const ar = (() => { try { const fs2 = require('fs'); const p = require('path'); return JSON.parse(fs2.readFileSync(p.join(process.env.DATA_DIR || '.', 'autoresponders.json'), 'utf-8')); } catch { return {}; } })();
+      if (!ar[guildId]) ar[guildId] = [];
+      ar[guildId].push({ trigger, matchType, response });
+      try { const fs2 = require('fs'); const p = require('path'); fs2.writeFileSync(p.join(process.env.DATA_DIR || '.', 'autoresponders.json'), JSON.stringify(ar, null, 2)); } catch {}
+      await interaction.reply({ content: `✅ Auto responder added! Trigger: \`${trigger}\` (${matchType})`, flags: MessageFlags.Ephemeral });
+      return;
+    }
+
   } catch (err) {
     console.error('[setup] interaction error:', err);
     try {
@@ -1639,7 +1925,7 @@ function renderLayout({ title, guildId, currentPath, allowedGuildIds, body, user
 ${DASH_CSS}
 </head><body>
 <nav>
-  <span class="nav-logo">⚙️ HIGH-SPEED CONNECTION DASHBOARD</span>
+  <span class="nav-logo">⚙️ HSC DASHBOARD</span>
   <ul class="nav-links">
     <li><a href="https://high-speed-connection.fly.dev" target="_blank">← Site</a></li>
     <li class="nav-user">👤 ${username || 'Unknown'}</li>
@@ -1762,42 +2048,179 @@ app.get('/camera', (req, res) => {
   if (!guildId) return res.redirect('/');
   const cfg = loadCameraConfig()[guildId] || {};
   const guild = client.guilds.cache.get(guildId);
-  const channels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildVoice) : [];
-  const roles = guild ? [...guild.roles.cache.values()].filter(r => r.id !== guild.id) : [];
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const voiceChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const categories = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildCategory).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const textChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const roles = guild ? [...guild.roles.cache.values()].filter(r => r.id !== guild.id).sort((a,b) => b.position - a.position) : [];
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌') ? 'flash-err' : 'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
   const monitored = cfg.monitoredChannels || [];
-  const exempt = cfg.exemptRoleIds || [];
+  const monitoredCats = cfg.monitoredCategoryIds || [];
+  const exempt = cfg.exemptRoles || cfg.exemptRoleIds || [];
+
+  const searchStyle = `<style>
+    .searchable-select{position:relative;}
+    .searchable-select input.search-input{margin-bottom:.5rem;}
+    .option-list{max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;background:var(--surface2);}
+    .option-list label{display:flex;align-items:center;gap:.6rem;padding:.4rem .75rem;font-size:.85rem;cursor:pointer;transition:background .15s;}
+    .option-list label:hover{background:var(--magenta-faint);}
+    .option-list label input[type=checkbox]{width:15px;height:15px;flex-shrink:0;}
+    .section-note{font-size:.78rem;color:var(--muted);margin-bottom:.75rem;padding:.5rem .75rem;background:var(--magenta-faint);border-left:2px solid var(--magenta);border-radius:0 4px 4px 0;}
+  </style>
+  <script>
+    function filterList(inputId, listId) {
+      const q = document.getElementById(inputId).value.toLowerCase();
+      document.querySelectorAll('#'+listId+' label').forEach(l => {
+        l.style.display = l.textContent.toLowerCase().includes(q) ? '' : 'none';
+      });
+    }
+  </script>`;
+
   const body = `
+    ${searchStyle}
     <div class="page-title">CAMERA POLICY</div>
-    <div class="page-sub">Enforce camera-on rules in voice channels.</div>
+    <div class="page-sub">Enforce camera-on rules in voice channels. Save each section independently.</div>
     ${flash}
-    <form method="POST" action="/camera/save?guild=${guildId}">
+
+    <form method="POST" action="/camera/save/status?guild=${guildId}">
       <div class="card">
         <div class="card-title">Status</div>
         <div class="toggle"><input type="checkbox" id="enabled" name="enabled" ${cfg.enabled ? 'checked' : ''}><label for="enabled">Camera policy enabled</label></div>
+        <div style="margin-top:1rem;"><button type="submit" class="btn btn-primary">💾 Save Status</button></div>
       </div>
+    </form>
+
+    <form method="POST" action="/camera/save/timing?guild=${guildId}">
       <div class="card">
         <div class="card-title">Timing</div>
-        <div class="form-row"><label>Grace period (minutes)</label><input type="number" name="graceMinutes" value="${cfg.graceMinutes ?? 2}" min="0" max="60"></div>
-        <div class="form-row"><label>Warning period (minutes)</label><input type="number" name="warningMinutes" value="${cfg.warningMinutes ?? 3}" min="0" max="60"></div>
+        <div class="form-row"><label>Grace period (minutes) — silent, no message</label><input type="number" name="graceMinutes" value="${cfg.graceMinutes ?? 2}" min="0" max="60"></div>
+        <div class="form-row"><label>Warning period (minutes) — after in-channel reminder</label><input type="number" name="warningMinutes" value="${cfg.warningMinutes ?? 3}" min="0" max="60"></div>
+        <button type="submit" class="btn btn-primary">💾 Save Timing</button>
       </div>
+    </form>
+
+    <form method="POST" action="/camera/save/announcement?guild=${guildId}">
       <div class="card">
-        <div class="card-title">Monitored Voice Channels</div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;">
-          ${channels.map(c => `<label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;"><input type="checkbox" name="monitoredChannels" value="${c.id}" ${monitored.includes(c.id) ? 'checked' : ''}> ${c.name}</label>`).join('')}
+        <div class="card-title">Announcement</div>
+        <div class="form-row"><label>Announcement channel — where to post policy reminders</label>
+          <select name="announcementChannelId">
+            <option value="">— no channel —</option>
+            ${textChannels.map(c => `<option value="${c.id}" ${cfg.announcementChannelId === c.id ? 'selected' : ''}>#${c.name}</option>`).join('')}
+          </select>
         </div>
+        <div class="form-row"><label>Announcement URL — link to your camera policy post (optional)</label>
+          <input type="text" name="announcementUrl" value="${cfg.announcementUrl || ''}" placeholder="https://discord.com/channels/...">
+        </div>
+        <button type="submit" class="btn btn-primary">💾 Save Announcement</button>
       </div>
+    </form>
+
+    <form method="POST" action="/camera/save/channels?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">Monitored Voice Channels &amp; Categories</div>
+        <p class="section-note">💡 You can select individual voice channels, entire categories, or both. Category selection monitors all voice channels inside it.</p>
+        <div class="form-row">
+          <label>Voice Channels</label>
+          <div class="searchable-select">
+            <input type="text" class="search-input" placeholder="Search channels..." oninput="filterList('camChanSearch','camChanList')">
+            <div class="option-list" id="camChanList">
+              ${voiceChannels.map(c => `<label><input type="checkbox" name="monitoredChannels" value="${c.id}" ${monitored.includes(c.id) ? 'checked' : ''}> 🔊 ${c.name}${c.parent ? ` <span style="color:var(--muted);font-size:.75rem;">(${c.parent.name})</span>` : ''}</label>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Categories (monitors all voice channels inside)</label>
+          <div class="searchable-select">
+            <input type="text" class="search-input" placeholder="Search categories..." oninput="filterList('camCatSearch','camCatList')">
+            <div class="option-list" id="camCatList">
+              ${categories.map(c => `<label><input type="checkbox" name="monitoredCategoryIds" value="${c.id}" ${monitoredCats.includes(c.id) ? 'checked' : ''}> 📁 ${c.name}</label>`).join('')}
+            </div>
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary">💾 Save Monitored Channels</button>
+      </div>
+    </form>
+
+    <form method="POST" action="/camera/save/roles?guild=${guildId}">
       <div class="card">
         <div class="card-title">Exempt Roles</div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;">
-          ${roles.map(r => `<label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;"><input type="checkbox" name="exemptRoles" value="${r.id}" ${exempt.includes(r.id) ? 'checked' : ''}> ${r.name}</label>`).join('')}
+        <p class="section-note">Members with these roles skip camera enforcement entirely.</p>
+        <div class="form-row">
+          <div class="searchable-select">
+            <input type="text" class="search-input" placeholder="Search roles..." oninput="filterList('camRoleSearch','camRoleList')">
+            <div class="option-list" id="camRoleList">
+              ${roles.map(r => `<label><input type="checkbox" name="exemptRoles" value="${r.id}" ${exempt.includes(r.id) ? 'checked' : ''}> @${r.name}</label>`).join('')}
+            </div>
+          </div>
         </div>
+        <button type="submit" class="btn btn-primary">💾 Save Exempt Roles</button>
       </div>
-      <button type="submit" class="btn btn-primary">💾 Save Changes</button>
     </form>`;
   res.send(renderLayout({ title: 'Camera Policy', guildId, currentPath: '/camera', allowedGuildIds, username: req.session.userTag, body }));
 });
 
+app.post('/camera/save/status', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig();
+  if (!cfg[guildId]) cfg[guildId] = {};
+  cfg[guildId].enabled = req.body.enabled === 'on';
+  saveCameraConfig(cfg);
+  cameraConfig = cfg;
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Status saved.')}`);
+});
+
+app.post('/camera/save/timing', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig();
+  if (!cfg[guildId]) cfg[guildId] = {};
+  cfg[guildId].graceMinutes = parseInt(req.body.graceMinutes) || 2;
+  cfg[guildId].warningMinutes = parseInt(req.body.warningMinutes) || 3;
+  saveCameraConfig(cfg);
+  cameraConfig = cfg;
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Timing saved.')}`);
+});
+
+app.post('/camera/save/announcement', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig();
+  if (!cfg[guildId]) cfg[guildId] = {};
+  cfg[guildId].announcementChannelId = req.body.announcementChannelId || null;
+  cfg[guildId].announcementUrl = req.body.announcementUrl?.trim() || null;
+  saveCameraConfig(cfg);
+  cameraConfig = cfg;
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Announcement saved.')}`);
+});
+
+app.post('/camera/save/channels', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig();
+  if (!cfg[guildId]) cfg[guildId] = {};
+  const mc = req.body.monitoredChannels;
+  cfg[guildId].monitoredChannels = mc ? (Array.isArray(mc) ? mc : [mc]) : [];
+  const mcat = req.body.monitoredCategoryIds;
+  cfg[guildId].monitoredCategoryIds = mcat ? (Array.isArray(mcat) ? mcat : [mcat]) : [];
+  saveCameraConfig(cfg);
+  cameraConfig = cfg;
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Monitored channels saved.')}`);
+});
+
+app.post('/camera/save/roles', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const cfg = loadCameraConfig();
+  if (!cfg[guildId]) cfg[guildId] = {};
+  const er = req.body.exemptRoles;
+  cfg[guildId].exemptRoles = er ? (Array.isArray(er) ? er : [er]) : [];
+  cfg[guildId].exemptRoleIds = cfg[guildId].exemptRoles; // keep compat
+  saveCameraConfig(cfg);
+  cameraConfig = cfg;
+  res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Exempt roles saved.')}`);
+});
+
+// Legacy save route (keep for compatibility)
 app.post('/camera/save', (req, res) => {
   const guildId = resolveGuildId(req);
   if (!guildId) return res.redirect('/');
@@ -1809,8 +2232,10 @@ app.post('/camera/save', (req, res) => {
   const mc = req.body.monitoredChannels;
   cfg[guildId].monitoredChannels = mc ? (Array.isArray(mc) ? mc : [mc]) : [];
   const er = req.body.exemptRoles;
-  cfg[guildId].exemptRoleIds = er ? (Array.isArray(er) ? er : [er]) : [];
+  cfg[guildId].exemptRoles = er ? (Array.isArray(er) ? er : [er]) : [];
+  cfg[guildId].exemptRoleIds = cfg[guildId].exemptRoles;
   saveCameraConfig(cfg);
+  cameraConfig = cfg;
   res.redirect(`/camera?guild=${guildId}&flash=${encodeURIComponent('✅ Camera policy saved.')}`);
 });
 
@@ -1819,27 +2244,153 @@ app.get('/channel-index', (req, res) => {
   const guildId = resolveGuildId(req);
   const allowedGuildIds = req.session.allowedGuildIds || [];
   if (!guildId) return res.redirect('/');
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌') ? 'flash-err' : 'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const guild = client.guilds.cache.get(guildId);
+  const indexCfg = ensureChannelIndexGuildConfig(guildId);
+  const descriptions = loadDescriptions(guildId);
+  const textChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText).sort((a,b) => a.name.localeCompare(b.name)) : [];
+
+  // Build channel rows grouped by category
+  const allChannels = guild ? [...guild.channels.cache.values()]
+    .filter(c => c.type !== ChannelType.GuildCategory)
+    .sort((a,b) => a.rawPosition - b.rawPosition) : [];
+
+  const byCategory = {};
+  for (const ch of allChannels) {
+    const cat = ch.parent?.name || 'No Category';
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(ch);
+  }
+
+  const channelRows = Object.entries(byCategory).map(([cat, channels]) => {
+    const rows = channels.map(ch => {
+      const excluded = indexCfg.excludedChannelIds?.includes(ch.id);
+      const desc = descriptions[ch.id]?.description || '';
+      const typeIcon = ch.type === ChannelType.GuildVoice ? '🔊' : ch.type === ChannelType.GuildForum ? '📋' : '#';
+      return `<tr>
+        <td style="white-space:nowrap;width:30px;text-align:center;">
+          <input type="checkbox" name="includedChannels" value="${ch.id}" ${!excluded ? 'checked' : ''} title="${excluded ? 'Excluded from index' : 'Included in index'}">
+        </td>
+        <td style="white-space:nowrap">${typeIcon} ${ch.name}</td>
+        <td><input type="text" name="desc_${ch.id}" value="${desc.replace(/"/g, '&quot;')}" placeholder="Add a description..." style="width:100%;padding:.3rem .5rem;font-size:.82rem;"></td>
+      </tr>`;
+    }).join('');
+    return `<tr><td colspan="3" style="background:var(--surface2);padding:.4rem .75rem;font-size:.72rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);">📁 ${cat}</td></tr>${rows}`;
+  }).join('');
+
   const body = `
     <div class="page-title">CHANNEL INDEX</div>
-    <div class="page-sub">Post a formatted channel index embed to Discord.</div>
+    <div class="page-sub">Post a formatted clickable index of your server's channels. Edit descriptions and choose which channels to include.</div>
     ${flash}
-    <div class="card">
-      <div class="card-title">Actions</div>
-      <form method="POST" action="/channel-index/post?guild=${guildId}" style="display:flex;gap:.75rem;flex-wrap:wrap;">
+
+    <form method="POST" action="/channel-index/post?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">Post Channel Index</div>
+        <div class="form-row">
+          <label>Post to channel</label>
+          <select name="targetChannelId">
+            <option value="">— select a channel —</option>
+            ${textChannels.map(c => `<option value="${c.id}">#${c.name}</option>`).join('')}
+          </select>
+        </div>
         <button type="submit" class="btn btn-primary">📋 Post Channel Index</button>
-      </form>
-    </div>`;
+      </div>
+    </form>
+
+    <form method="POST" action="/channel-index/save-descriptions?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">Channels &amp; Descriptions</div>
+        <p style="font-size:.8rem;color:var(--muted);margin-bottom:1rem;">Check the box to include a channel in the index. Add descriptions to appear alongside channel links.</p>
+        <table>
+          <thead><tr>
+            <th style="width:30px;text-align:center;" title="Include in index">✓</th>
+            <th>Channel</th>
+            <th>Description</th>
+          </tr></thead>
+          <tbody>${channelRows}</tbody>
+        </table>
+        <div style="margin-top:1rem;">
+          <button type="submit" class="btn btn-primary">💾 Save Descriptions &amp; Visibility</button>
+        </div>
+      </div>
+    </form>`;
   res.send(renderLayout({ title: 'Channel Index', guildId, currentPath: '/channel-index', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+app.post('/channel-index/save-descriptions', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  const allChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type !== ChannelType.GuildCategory) : [];
+
+  // Save descriptions
+  const all = loadAllDescriptions();
+  if (!all[guildId]) all[guildId] = {};
+  for (const ch of allChannels) {
+    const desc = req.body[`desc_${ch.id}`] || '';
+    all[guildId][ch.id] = { name: ch.name, description: desc.trim() };
+  }
+  saveAllDescriptions(all);
+
+  // Save included/excluded channels
+  const includedRaw = req.body.includedChannels;
+  const included = includedRaw ? (Array.isArray(includedRaw) ? includedRaw : [includedRaw]) : [];
+  const excluded = allChannels.map(c => c.id).filter(id => !included.includes(id));
+  const indexCfg = ensureChannelIndexGuildConfig(guildId);
+  indexCfg.excludedChannelIds = excluded;
+  saveChannelIndexConfig(channelIndexConfig);
+
+  res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('✅ Descriptions and visibility saved.')}`);
 });
 
 app.post('/channel-index/post', async (req, res) => {
   const guildId = resolveGuildId(req);
   if (!guildId) return res.redirect('/');
+  const targetChannelId = req.body.targetChannelId;
+  if (!targetChannelId) return res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('❌ Please select a channel to post to.')}`);
   try {
     const guild = await client.guilds.fetch(guildId);
-    await exportToFile(guild);
-    res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('✅ Channel index posted.')}`);
+    await guild.channels.fetch();
+    const targetCh = guild.channels.cache.get(targetChannelId);
+    if (!targetCh) return res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('❌ Channel not found.')}`);
+
+    const data = getChannelData(guild);
+    const indexCfg = ensureChannelIndexGuildConfig(guildId);
+    const descriptions = loadDescriptions(guildId);
+    const byCategory = {};
+    for (const ch of data) {
+      if (indexCfg.excludedCategoryIds?.includes(ch.categoryId)) continue;
+      if (indexCfg.excludedChannelIds?.includes(ch.id)) continue;
+      const nameLower = ch.name.toLowerCase();
+      if (indexCfg.excludedNameKeywords?.some(kw => nameLower.includes(kw))) continue;
+      const key = ch.category || 'No Category';
+      if (!byCategory[key]) byCategory[key] = [];
+      byCategory[key].push(ch);
+    }
+
+    const MAX_FIELDS = 25; const MAX_CHARS = 5500;
+    const embeds = []; let current = null; let fieldCount = 0; let charCount = 0; let isFirst = true;
+    const startNewEmbed = () => {
+      const e = new EmbedBuilder().setColor(0x8a2be2);
+      if (isFirst) { e.setTitle('Channel Index').setTimestamp(); isFirst = false; }
+      return e;
+    };
+    current = startNewEmbed();
+    for (const [category, chans] of Object.entries(byCategory)) {
+      const lines = chans.map(ch => {
+        const desc = descriptions[ch.id]?.description?.trim();
+        return `[${desc ? `**#${ch.name}** — ${desc}` : `**#${ch.name}**`}](${ch.link})`;
+      });
+      const value = lines.join('\n').slice(0, 1024) || '—';
+      if (fieldCount >= MAX_FIELDS || charCount + category.length + value.length > MAX_CHARS) {
+        embeds.push(current); current = startNewEmbed(); fieldCount = 0; charCount = 0;
+      }
+      current.addFields({ name: category, value }); fieldCount++; charCount += category.length + value.length;
+    }
+    embeds.push(current);
+    await targetCh.send({ embeds: [embeds[0]] });
+    for (let i = 1; i < embeds.length; i++) await targetCh.send({ embeds: [embeds[i]] });
+    res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('✅ Channel index posted to #' + targetCh.name)}`);
   } catch (err) {
     res.redirect(`/channel-index?guild=${guildId}&flash=${encodeURIComponent('❌ Error: ' + err.message)}`);
   }
@@ -1850,32 +2401,244 @@ app.get('/speed-match', (req, res) => {
   const guildId = resolveGuildId(req);
   const allowedGuildIds = req.session.allowedGuildIds || [];
   if (!guildId) return res.redirect('/');
-  const cfg = (loadVcShuffleConfig()[guildId]) || {};
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  const guild = client.guilds.cache.get(guildId);
+  const state = shuffleState.get(guildId);
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌') ? 'flash-err' : 'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
+
+  const running = cfg.enabled;
+  const modeLabel = cfg.connectionMode === 'role-based' ? 'Role-Based Pools' : (cfg.minGroupSize === 1 ? '1-on-1' : `${cfg.minGroupSize}v${cfg.minGroupSize}`);
+  const nextAt = state?.nextShuffleAt ? new Date(state.nextShuffleAt).toLocaleTimeString() : '—';
+  const uniquePairs = state?.pairHistory?.size ?? 0;
+  const roundNum = state?.roundNumber ?? 0;
+
+  // Get configured channels/categories to show
+  const textChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const voiceChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const categories = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildCategory).sort((a,b) => a.rawPosition - b.rawPosition) : [];
+
+  // Cloud rooms display
+  const cloudRoomRows = (cfg.cloudRoomIds || []).map(id => {
+    const ch = guild?.channels.cache.get(id);
+    return `<tr><td>🔊 ${ch?.name || id}</td><td style="color:var(--muted);font-size:.8rem;">${id}</td><td><form method="POST" action="/speed-match/cloudroom/remove?guild=${guildId}" style="display:inline"><input type="hidden" name="roomId" value="${id}"><button type="submit" class="btn btn-danger" style="padding:.2rem .5rem;font-size:.75rem;">Remove</button></form></td></tr>`;
+  }).join('');
+
+  // Configured channels in event category
+  let eventCatChannels = '';
+  if (cfg.eventCategoryId) {
+    const cat = guild?.channels.cache.get(cfg.eventCategoryId);
+    const subChannels = guild ? [...guild.channels.cache.values()].filter(c => c.parentId === cfg.eventCategoryId).sort((a,b) => a.rawPosition - b.rawPosition) : [];
+    eventCatChannels = `
+      <div class="card">
+        <div class="card-title">Event Category — ${cat?.name || cfg.eventCategoryId}</div>
+        <p style="font-size:.8rem;color:var(--muted);margin-bottom:.75rem;">These channels are in the configured event category. Temp rooms are created here during a session.</p>
+        <table>
+          <thead><tr><th>Channel</th><th>Type</th></tr></thead>
+          <tbody>
+            ${subChannels.map(c => `<tr><td>${c.type === ChannelType.GuildVoice ? '🔊' : '#'} ${c.name}</td><td style="color:var(--muted);font-size:.8rem;">${c.type === ChannelType.GuildVoice ? 'voice' : 'text'}</td></tr>`).join('') || '<tr><td colspan="2" style="color:var(--muted)">No channels in this category yet.</td></tr>'}
+          </tbody>
+        </table>
+        ${subChannels.length === 0 ? `<form method="POST" action="/speed-match/create-channels?guild=${guildId}" style="margin-top:1rem;"><button type="submit" class="btn btn-primary">➕ Create Standard Event Channels</button></form>` : ''}
+      </div>`;
+  }
+
   const body = `
     <div class="page-title">SPEED MATCH</div>
-    <div class="page-sub">Manage speed matching events. Use Discord slash commands to start/stop.</div>
+    <div class="page-sub">HIGH-SPEED CONNECTION — speed matching event management.</div>
     ${flash}
-    <div class="card">
-      <div class="card-title">Current Status</div>
-      <table>
-        <tr><td>Session</td><td><span class="status-dot ${cfg.running ? 'status-on' : 'status-off'}"></span>${cfg.running ? 'Running' : 'Idle'}</td></tr>
-        <tr><td>Connection Mode</td><td>${cfg.connectionMode || 'standard'}</td></tr>
-        <tr><td>Round Duration</td><td>${cfg.roundMinutes || 5} minutes</td></tr>
-        <tr><td>Cloud Rooms</td><td>${cfg.cloudRoomIds?.length || 0} configured</td></tr>
-      </table>
-    </div>
-    <div class="card">
-      <div class="card-title">Slash Commands</div>
-      <div style="color:var(--muted);font-size:.85rem;line-height:2;">
-        <code style="color:var(--magenta)">/speed-match start</code> — Start a session<br>
-        <code style="color:var(--magenta)">/speed-match stop</code> — Stop the session<br>
-        <code style="color:var(--magenta)">/speed-match status</code> — Check session status<br>
-        <code style="color:var(--magenta)">/speed-match shuffle-now</code> — Force a shuffle<br>
-        <code style="color:var(--magenta)">/speed-match end-session</code> — End and post summary
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:1rem;margin-bottom:1.5rem;">
+      <div class="card" style="text-align:center;padding:1rem;">
+        <div style="font-size:1.75rem;margin-bottom:.25rem;">${running ? '🟢' : '🔴'}</div>
+        <div style="font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);">Status</div>
+        <div style="font-size:1rem;font-weight:600;margin-top:.25rem;">${running ? 'Running' : 'Idle'}</div>
       </div>
+      <div class="card" style="text-align:center;padding:1rem;">
+        <div style="font-size:1.75rem;margin-bottom:.25rem;">🔄</div>
+        <div style="font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);">Round</div>
+        <div style="font-size:1rem;font-weight:600;margin-top:.25rem;">#${roundNum}</div>
+      </div>
+      <div class="card" style="text-align:center;padding:1rem;">
+        <div style="font-size:1.75rem;margin-bottom:.25rem;">🤝</div>
+        <div style="font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);">Pairs Made</div>
+        <div style="font-size:1rem;font-weight:600;margin-top:.25rem;">${uniquePairs}</div>
+      </div>
+      <div class="card" style="text-align:center;padding:1rem;">
+        <div style="font-size:1.75rem;margin-bottom:.25rem;">⏱</div>
+        <div style="font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);">Next Bell</div>
+        <div style="font-size:.9rem;font-weight:600;margin-top:.25rem;">${running ? nextAt : '—'}</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Session Controls</div>
+      <p style="font-size:.8rem;color:var(--muted);margin-bottom:1rem;">Mode: <strong>${modeLabel}</strong> · Interval: <strong>${cfg.minIntervalMinutes}–${cfg.maxIntervalMinutes} min</strong></p>
+      <div style="display:flex;gap:.75rem;flex-wrap:wrap;">
+        <form method="POST" action="/speed-match/start?guild=${guildId}" style="display:inline">
+          <button type="submit" class="btn btn-primary" ${running ? 'disabled' : ''}>▶️ Start Session</button>
+        </form>
+        <form method="POST" action="/speed-match/bell?guild=${guildId}" style="display:inline">
+          <button type="submit" class="btn btn-ghost" ${!running ? 'disabled' : ''}>🔔 Ring Bell Now</button>
+        </form>
+        <form method="POST" action="/speed-match/stop?guild=${guildId}" style="display:inline">
+          <button type="submit" class="btn btn-danger" ${!running ? 'disabled' : ''}>⏹ End Session</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Quick Commands</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.5rem;">
+        ${[
+          ['/speed-match start', 'Start a session'],
+          ['/speed-match stop', 'Stop the session'],
+          ['/speed-match status', 'Check session status'],
+          ['/speed-match shuffle-now', 'Force a shuffle'],
+          ['/speed-match end-session', 'End + post summary'],
+          ['/speed-match set-group-size', 'Set group size'],
+          ['/speed-match set-interval', 'Set round interval'],
+          ['/speed-match add-lobby', 'Add a lobby VC'],
+          ['/speed-match set-category', 'Set event category'],
+        ].map(([cmd, desc]) => `
+          <div style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:.6rem .85rem;display:flex;flex-direction:column;gap:.2rem;">
+            <code style="color:var(--magenta);font-size:.82rem;">${cmd}</code>
+            <span style="color:var(--muted);font-size:.78rem;">${desc}</span>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <form method="POST" action="/speed-match/config?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">Configuration</div>
+        <div class="form-row"><label>Lobby voice channel(s)</label>
+          <select name="lobbyChannelId">
+            <option value="">— select lobby voice channel —</option>
+            ${voiceChannels.map(c => `<option value="${c.id}" ${cfg.lobbyChannelIds?.includes(c.id) ? 'selected' : ''}>🔊 ${c.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row"><label>Event category (temp rooms created here)</label>
+          <select name="eventCategoryId">
+            <option value="">— select category —</option>
+            ${categories.map(c => `<option value="${c.id}" ${cfg.eventCategoryId === c.id ? 'selected' : ''}>📁 ${c.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row"><label>Matchups / announcements channel</label>
+          <select name="matchupsChannelId">
+            <option value="">— select channel —</option>
+            ${textChannels.map(c => `<option value="${c.id}" ${cfg.matchupsChannelId === c.id ? 'selected' : ''}>#${c.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row"><label>Staff panel channel (staff only)</label>
+          <select name="staffPanelChannelId">
+            <option value="">— select channel —</option>
+            ${textChannels.map(c => `<option value="${c.id}" ${cfg.staffPanelChannelId === c.id ? 'selected' : ''}>#${c.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row"><label>Min round interval (minutes)</label><input type="number" name="minIntervalMinutes" value="${cfg.minIntervalMinutes ?? 3}" min="1" max="60"></div>
+        <div class="form-row"><label>Max round interval (minutes)</label><input type="number" name="maxIntervalMinutes" value="${cfg.maxIntervalMinutes ?? 3}" min="1" max="60"></div>
+        <button type="submit" class="btn btn-primary">💾 Save Configuration</button>
+      </div>
+    </form>
+
+    ${eventCatChannels}
+
+    ${cloudRoomRows ? `<div class="card"><div class="card-title">Cloud Rooms</div><table><thead><tr><th>Channel</th><th>ID</th><th></th></tr></thead><tbody>${cloudRoomRows}</tbody></table></div>` : ''}
+
+    <div class="card">
+      <div class="card-title">Support Server</div>
+      <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">Have questions about Speed Match or the bot? Join the support server for help.</p>
+      <a href="https://discord.gg/kea3NVHJW7" target="_blank" class="btn btn-primary">📨 Join Support Server</a>
     </div>`;
   res.send(renderLayout({ title: 'Speed Match', guildId, currentPath: '/speed-match', allowedGuildIds, username: req.session.userTag, body }));
+});
+
+app.post('/speed-match/start', async (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  if (!cfg.lobbyChannelIds?.length) return res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Add a lobby channel first.')}`);
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Guild not found.')}`);
+  try {
+    await startVcShuffle(guild, guildId, true);
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('✅ Session started!')}`);
+  } catch (err) {
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Error: ' + err.message)}`);
+  }
+});
+
+app.post('/speed-match/bell', async (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Guild not found.')}`);
+  try {
+    const state = shuffleState.get(guildId);
+    if (state?.warningTimeoutId) { clearTimeout(state.warningTimeoutId); state.warningTimeoutId = null; }
+    await postBellMessage(guild, guildId);
+    await runShuffleRound(guild, guildId);
+    scheduleNextShuffle(guild, guildId);
+    await refreshStaffPanel(guild, guildId);
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('🔔 Bell rung! New round started.')}`);
+  } catch (err) {
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Error: ' + err.message)}`);
+  }
+});
+
+app.post('/speed-match/stop', async (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Guild not found.')}`);
+  try {
+    await stopVcShuffle(guild, guildId);
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('⏹ Session ended.')}`);
+  } catch (err) {
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Error: ' + err.message)}`);
+  }
+});
+
+app.post('/speed-match/config', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  if (req.body.lobbyChannelId) {
+    if (!cfg.lobbyChannelIds.includes(req.body.lobbyChannelId)) cfg.lobbyChannelIds.push(req.body.lobbyChannelId);
+  }
+  if (req.body.eventCategoryId) cfg.eventCategoryId = req.body.eventCategoryId || null;
+  if (req.body.matchupsChannelId !== undefined) cfg.matchupsChannelId = req.body.matchupsChannelId || null;
+  if (req.body.staffPanelChannelId !== undefined) { cfg.staffPanelChannelId = req.body.staffPanelChannelId || null; cfg.staffPanelMessageId = null; }
+  const min = parseInt(req.body.minIntervalMinutes); const max = parseInt(req.body.maxIntervalMinutes);
+  if (!isNaN(min) && min >= 1) cfg.minIntervalMinutes = min;
+  if (!isNaN(max) && max >= 1) cfg.maxIntervalMinutes = max;
+  saveVcShuffleConfig(vcShuffleConfig);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('✅ Speed Match configuration saved.')}`);
+});
+
+app.post('/speed-match/cloudroom/remove', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  cfg.cloudRoomIds = (cfg.cloudRoomIds || []).filter(id => id !== req.body.roomId);
+  saveVcShuffleConfig(vcShuffleConfig);
+  res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('✅ Room removed.')}`);
+});
+
+app.post('/speed-match/create-channels', async (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const cfg = ensureVcShuffleGuildConfig(guildId);
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild || !cfg.eventCategoryId) return res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Set an event category first.')}`);
+  try {
+    const category = guild.channels.cache.get(cfg.eventCategoryId);
+    if (!category) return res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Category not found.')}`);
+    await guild.channels.create({ name: 'matchups', type: ChannelType.GuildText, parent: cfg.eventCategoryId });
+    await guild.channels.create({ name: 'lobby', type: ChannelType.GuildVoice, parent: cfg.eventCategoryId });
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('✅ Standard event channels created!')}`);
+  } catch (err) {
+    res.redirect(`/speed-match?guild=${guildId}&flash=${encodeURIComponent('❌ Error: ' + err.message)}`);
+  }
 });
 
 // ── sticky posts ───────────────────────────────────────────────────────────
@@ -1910,18 +2673,43 @@ app.get('/sticky', (req, res) => {
   const guild = client.guilds.cache.get(guildId);
   const sticky = loadSticky();
   const gSticky = sticky[guildId] || {};
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌') ? 'flash-err' : 'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const editChannelId = req.query.edit || null;
   const channels = guild ? [...guild.channels.cache.values()].filter(c =>
     c.type === ChannelType.GuildText || c.type === ChannelType.GuildVoice ||
     c.type === ChannelType.PublicThread || c.type === ChannelType.GuildForum
   ).sort((a,b) => a.name.localeCompare(b.name)) : [];
 
+  const channelSearch = `<input type="text" id="chanSearch" placeholder="Search channels by name (#)..." oninput="filterSel(this,'channelId')" style="margin-bottom:.5rem;">
+  <script>function filterSel(inp,selId){const v=inp.value.toLowerCase();const sel=document.getElementById(selId);[...sel.options].forEach(o=>{o.hidden=o.value&&!o.text.toLowerCase().includes(v);});}</script>`;
+
+  const editEntry = editChannelId ? gSticky[editChannelId] : null;
+
   const existingRows = Object.entries(gSticky).map(([chId, entry]) => {
     const ch = guild?.channels.cache.get(chId);
+    const isEditing = chId === editChannelId;
+    if (isEditing) {
+      return `<tr style="background:var(--magenta-faint);">
+        <td colspan="3">
+          <form method="POST" action="/sticky/save?guild=${guildId}" style="display:flex;flex-direction:column;gap:.5rem;padding:.5rem 0;">
+            <input type="hidden" name="channelId" value="${chId}">
+            <strong style="color:var(--magenta)">Editing: #${ch?.name || chId}</strong>
+            <textarea name="content" rows="3" style="width:100%;">${entry.content.replace(/</g,'&lt;')}</textarea>
+            <div style="display:flex;gap:.5rem;">
+              <button type="submit" class="btn btn-primary" style="padding:.25rem .75rem;font-size:.8rem;">💾 Save</button>
+              <a href="/sticky?guild=${guildId}" class="btn btn-ghost" style="padding:.25rem .75rem;font-size:.8rem;">Cancel</a>
+            </div>
+          </form>
+        </td>
+      </tr>`;
+    }
     return `<tr>
-      <td>#${ch?.name || chId}</td>
-      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${entry.content}</td>
-      <td><form method="POST" action="/sticky/delete?guild=${guildId}"><input type="hidden" name="channelId" value="${chId}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">Remove</button></form></td>
+      <td style="white-space:nowrap">#${ch?.name || chId}</td>
+      <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:.85rem;">${entry.content.replace(/</g,'&lt;')}</td>
+      <td style="white-space:nowrap;display:flex;gap:.4rem;">
+        <a href="/sticky?guild=${guildId}&edit=${chId}" class="btn btn-ghost" style="padding:.25rem .6rem;font-size:.75rem;">✏️ Edit</a>
+        <form method="POST" action="/sticky/delete?guild=${guildId}" style="display:inline"><input type="hidden" name="channelId" value="${chId}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">🗑 Remove</button></form>
+      </td>
     </tr>`;
   }).join('');
 
@@ -1930,10 +2718,12 @@ app.get('/sticky', (req, res) => {
     <div class="page-sub">Messages that re-post themselves at the bottom of a channel whenever someone else sends a message.</div>
     ${flash}
     <div class="card">
-      <div class="card-title">Add Sticky Post</div>
+      <div class="card-title">${editChannelId && !editEntry ? '⚠️ Channel not found' : 'Add Sticky Post'}</div>
       <form method="POST" action="/sticky/save?guild=${guildId}">
-        <div class="form-row"><label>Channel</label>
-          <select name="channelId"><option value="">— select channel —</option>
+        <div class="form-row"><label>Channel (search by #name)</label>
+          ${channelSearch}
+          <select name="channelId" id="channelId">
+            <option value="">— select channel —</option>
             ${channels.map(c => `<option value="${c.id}">${c.type === ChannelType.GuildVoice ? '🔊' : '#'} ${c.name}</option>`).join('')}
           </select>
         </div>
@@ -1941,7 +2731,7 @@ app.get('/sticky', (req, res) => {
         <button type="submit" class="btn btn-primary">📌 Set Sticky</button>
       </form>
     </div>
-    ${existingRows ? `<div class="card"><div class="card-title">Active Sticky Posts</div><table><thead><tr><th>Channel</th><th>Message</th><th></th></tr></thead><tbody>${existingRows}</tbody></table></div>` : ''}`;
+    ${existingRows ? `<div class="card"><div class="card-title">Active Sticky Posts (${Object.keys(gSticky).length})</div><table><thead><tr><th>Channel</th><th>Message</th><th style="width:140px">Actions</th></tr></thead><tbody>${existingRows}</tbody></table></div>` : '<div class="card"><p style="color:var(--muted)">No sticky posts configured yet.</p></div>'}`;
   res.send(renderLayout({ title: 'Sticky Posts', guildId, currentPath: '/sticky', allowedGuildIds, username: req.session.userTag, body }));
 });
 
@@ -1995,16 +2785,56 @@ app.get('/autoresponder', (req, res) => {
   if (!guildId) return res.redirect('/');
   const ar = loadAR();
   const gAR = ar[guildId] || [];
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
-  const rows = gAR.map((rule, i) => `<tr>
-    <td><code>${rule.trigger}</code></td>
-    <td>${rule.matchType}</td>
-    <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rule.response}</td>
-    <td><form method="POST" action="/autoresponder/delete?guild=${guildId}"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">Remove</button></form></td>
-  </tr>`).join('');
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌') ? 'flash-err' : 'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const editIdx = req.query.edit !== undefined ? parseInt(req.query.edit) : -1;
+  const editRule = editIdx >= 0 ? gAR[editIdx] : null;
+
+  const rows = gAR.map((rule, i) => {
+    if (i === editIdx) {
+      return `<tr style="background:var(--magenta-faint);">
+        <td colspan="4">
+          <form method="POST" action="/autoresponder/update?guild=${guildId}" style="display:flex;flex-direction:column;gap:.5rem;padding:.5rem 0;">
+            <input type="hidden" name="index" value="${i}">
+            <strong style="color:var(--magenta)">Editing rule #${i + 1}</strong>
+            <div style="display:flex;gap:.75rem;flex-wrap:wrap;">
+              <div style="flex:1;min-width:180px;">
+                <label style="font-size:.78rem;color:var(--muted);display:block;margin-bottom:.25rem;">Trigger</label>
+                <input type="text" name="trigger" value="${rule.trigger.replace(/"/g,'&quot;')}" style="width:100%;">
+              </div>
+              <div style="min-width:150px;">
+                <label style="font-size:.78rem;color:var(--muted);display:block;margin-bottom:.25rem;">Match type</label>
+                <select name="matchType" style="width:100%;">
+                  <option value="contains" ${rule.matchType === 'contains' ? 'selected' : ''}>Contains</option>
+                  <option value="exact" ${rule.matchType === 'exact' ? 'selected' : ''}>Exact</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label style="font-size:.78rem;color:var(--muted);display:block;margin-bottom:.25rem;">Response</label>
+              <textarea name="response" rows="3" style="width:100%;">${rule.response.replace(/</g,'&lt;')}</textarea>
+            </div>
+            <div style="display:flex;gap:.5rem;">
+              <button type="submit" class="btn btn-primary" style="padding:.25rem .75rem;font-size:.8rem;">💾 Save</button>
+              <a href="/autoresponder?guild=${guildId}" class="btn btn-ghost" style="padding:.25rem .75rem;font-size:.8rem;">Cancel</a>
+            </div>
+          </form>
+        </td>
+      </tr>`;
+    }
+    return `<tr>
+      <td><code style="color:var(--magenta)">${rule.trigger.replace(/</g,'&lt;')}</code></td>
+      <td><span style="font-size:.75rem;background:var(--surface2);padding:.15rem .4rem;border-radius:3px;">${rule.matchType}</span></td>
+      <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:.85rem;">${rule.response.replace(/</g,'&lt;')}</td>
+      <td style="white-space:nowrap;display:flex;gap:.4rem;">
+        <a href="/autoresponder?guild=${guildId}&edit=${i}" class="btn btn-ghost" style="padding:.25rem .6rem;font-size:.75rem;">✏️ Edit</a>
+        <form method="POST" action="/autoresponder/delete?guild=${guildId}" style="display:inline"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">🗑 Remove</button></form>
+      </td>
+    </tr>`;
+  }).join('');
+
   const body = `
     <div class="page-title">AUTO RESPONDERS</div>
-    <div class="page-sub">Bot replies automatically when a trigger word or phrase is detected.</div>
+    <div class="page-sub">Bot replies automatically when a trigger word or phrase is detected in any message.</div>
     ${flash}
     <div class="card">
       <div class="card-title">Add Auto Responder</div>
@@ -2012,15 +2842,15 @@ app.get('/autoresponder', (req, res) => {
         <div class="form-row"><label>Trigger phrase</label><input type="text" name="trigger" placeholder="e.g. !rules or when does the event start"></div>
         <div class="form-row"><label>Match type</label>
           <select name="matchType">
-            <option value="contains">Contains (trigger appears anywhere in message)</option>
-            <option value="exact">Exact match only</option>
+            <option value="contains">Contains — trigger appears anywhere in the message</option>
+            <option value="exact">Exact match — full message must equal trigger</option>
           </select>
         </div>
         <div class="form-row"><label>Response</label><textarea name="response" placeholder="Bot's reply..." rows="3"></textarea></div>
         <button type="submit" class="btn btn-primary">➕ Add Responder</button>
       </form>
     </div>
-    ${rows ? `<div class="card"><div class="card-title">Active Responders</div><table><thead><tr><th>Trigger</th><th>Match</th><th>Response</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}`;
+    ${rows ? `<div class="card"><div class="card-title">Active Responders (${gAR.length})</div><table><thead><tr><th>Trigger</th><th>Match</th><th>Response</th><th style="width:130px">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="card"><p style="color:var(--muted)">No auto responders configured yet.</p></div>'}`;
   res.send(renderLayout({ title: 'Auto Responders', guildId, currentPath: '/autoresponder', allowedGuildIds, username: req.session.userTag, body }));
 });
 
@@ -2034,6 +2864,19 @@ app.post('/autoresponder/save', (req, res) => {
   ar[guildId].push({ trigger: trigger.trim(), matchType: matchType || 'contains', response: response.trim() });
   saveAR(ar);
   res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('✅ Auto responder added.')}`);
+});
+
+app.post('/autoresponder/update', (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const idx = parseInt(req.body.index);
+  const { trigger, matchType, response } = req.body;
+  if (!trigger?.trim() || !response?.trim()) return res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('❌ Trigger and response are required.')}`);
+  const ar = loadAR();
+  if (!ar[guildId] || !ar[guildId][idx]) return res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('❌ Responder not found.')}`);
+  ar[guildId][idx] = { trigger: trigger.trim(), matchType: matchType || 'contains', response: response.trim() };
+  saveAR(ar);
+  res.redirect(`/autoresponder?guild=${guildId}&flash=${encodeURIComponent('✅ Auto responder updated.')}`);
 });
 
 app.post('/autoresponder/delete', (req, res) => {
@@ -2059,23 +2902,57 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!cfg?.vcRoleId) return;
   const guild = newState.guild || oldState.guild;
 
-  // joined a VC
-  if (!oldState.channelId && newState.channelId) {
+  const justJoined = !oldState.channelId && newState.channelId;
+  const justLeft   = oldState.channelId && !newState.channelId;
+  const switched   = oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId;
+
+  // Joined a VC (from outside)
+  if (justJoined) {
     const member = newState.member;
-    if (member) {
+    if (member && !member.user.bot) {
       await member.roles.add(cfg.vcRoleId, 'HSC: joined VC').catch(() => {});
-      // announce if channel went from 0→1
-      if (cfg.announceChannelId && newState.channel?.members.size === 1) {
+      // Announce if channel went from 0→1
+      const channelSize = newState.channel?.members?.filter(m => !m.user.bot).size ?? 0;
+      if (cfg.announceChannelId && channelSize === 1) {
         const ch = guild.channels.cache.get(cfg.announceChannelId);
-        if (ch) await ch.send(`🔊 ${newState.channel.name} is now active! ${member} just joined.`).catch(() => {});
+        if (ch) {
+          const msg = cfg.announceMsg
+            ? cfg.announceMsg.replace('{user}', `<@${member.id}>`).replace('{channel}', newState.channel?.name || '').replace('{mention}', `<#${newState.channelId}>`)
+            : `🔊 **${newState.channel?.name}** is now active! ${member} just joined.`;
+          await ch.send(msg).catch(() => {});
+        }
+      }
+      // Post in VC text channel if set
+      if (cfg.vcTextChannelId) {
+        const vcText = guild.channels.cache.get(cfg.vcTextChannelId);
+        if (vcText) await vcText.send(`👋 ${member} joined **${newState.channel?.name}**.`).catch(() => {});
       }
     }
   }
 
-  // left a VC
-  if (oldState.channelId && !newState.channelId) {
+  // Switched rooms — check if new room went from 0→1 (non-bot members)
+  if (switched) {
+    const member = newState.member;
+    if (member && !member.user.bot) {
+      const newChannelSize = newState.channel?.members?.filter(m => !m.user.bot).size ?? 0;
+      if (cfg.announceChannelId && newChannelSize === 1) {
+        const ch = guild.channels.cache.get(cfg.announceChannelId);
+        if (ch) {
+          const msg = cfg.announceMsg
+            ? cfg.announceMsg.replace('{user}', `<@${member.id}>`).replace('{channel}', newState.channel?.name || '').replace('{mention}', `<#${newState.channelId}>`)
+            : `🔊 **${newState.channel?.name}** is now active! ${member} just joined.`;
+          await ch.send(msg).catch(() => {});
+        }
+      }
+    }
+  }
+
+  // Left a VC entirely
+  if (justLeft) {
     const member = oldState.member;
-    if (member) await member.roles.remove(cfg.vcRoleId, 'HSC: left VC').catch(() => {});
+    if (member && !member.user.bot) {
+      await member.roles.remove(cfg.vcRoleId, 'HSC: left VC').catch(() => {});
+    }
   }
 });
 
@@ -2117,15 +2994,35 @@ app.get('/temproles', (req, res) => {
   const tr = loadTR();
   const cfg = tr[guildId] || {};
   const roles = guild ? [...guild.roles.cache.values()].filter(r => r.id !== guild.id).sort((a,b) => b.position - a.position) : [];
-  const textChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText) : [];
-  const flash = req.query.flash ? `<div class="flash flash-ok">${decodeURIComponent(req.query.flash)}</div>` : '';
+  const textChannels = guild ? [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText).sort((a,b) => a.name.localeCompare(b.name)) : [];
+  const flash = req.query.flash ? `<div class="flash ${req.query.flash.includes('❌') ? 'flash-err' : 'flash-ok'}">${decodeURIComponent(req.query.flash)}</div>` : '';
+
+  const roleOpts = (selectedId) => roles.map(r => `<option value="${r.id}" ${selectedId === r.id ? 'selected' : ''}>@${r.name}</option>`).join('');
+  const chanOpts = (selectedId) => textChannels.map(c => `<option value="${c.id}" ${selectedId === c.id ? 'selected' : ''}>#${c.name}</option>`).join('');
+  const chanSearch = `<input type="text" placeholder="Search channels (#)..." oninput="this.nextElementSibling.querySelectorAll('option').forEach(o=>{o.hidden=o.value&&!o.text.toLowerCase().includes(this.value.toLowerCase());})" style="margin-bottom:.4rem;">`;
+  const roleSearch = `<input type="text" placeholder="Search roles (@)..." oninput="this.nextElementSibling.querySelectorAll('option').forEach(o=>{o.hidden=o.value&&!o.text.toLowerCase().includes(this.value.toLowerCase());})" style="margin-bottom:.4rem;">`;
+
   const timedRows = (cfg.timedRoles || []).map((r, i) => {
     const role = guild?.roles.cache.get(r.roleId);
     return `<tr>
-      <td>${role ? `@${role.name}` : r.roleId}</td>
+      <td>${role ? `<span style="color:var(--magenta)">@${role.name}</span>` : `<code>${r.roleId}</code>`}</td>
       <td>${r.durationMinutes} min</td>
-      <td><code>temprole:${r.roleId}</code></td>
-      <td><form method="POST" action="/temproles/timed/delete?guild=${guildId}"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">Remove</button></form></td>
+      <td>
+        <form method="POST" action="/temproles/timed/postbutton?guild=${guildId}">
+          <input type="hidden" name="roleId" value="${r.roleId}">
+          <input type="hidden" name="durationMinutes" value="${r.durationMinutes}">
+          <div style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;">
+            ${chanSearch}
+            <select name="channelId" style="flex:1;min-width:120px;">
+              <option value="">— channel —</option>
+              ${chanOpts('')}
+            </select>
+            <input type="text" name="label" value="Get Role" style="width:90px;" placeholder="Button label">
+            <button type="submit" class="btn btn-ghost" style="padding:.25rem .6rem;font-size:.75rem;white-space:nowrap;">📤 Post</button>
+          </div>
+        </form>
+      </td>
+      <td><form method="POST" action="/temproles/timed/delete?guild=${guildId}"><input type="hidden" name="index" value="${i}"><button type="submit" class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem;">🗑</button></form></td>
     </tr>`;
   }).join('');
 
@@ -2133,39 +3030,54 @@ app.get('/temproles', (req, res) => {
     <div class="page-title">TEMP ROLES</div>
     <div class="page-sub">VC presence roles and timed button roles.</div>
     ${flash}
-    <div class="card">
-      <div class="card-title">VC Role — Applied on Join, Removed on Leave</div>
-      <form method="POST" action="/temproles/vc/save?guild=${guildId}">
-        <div class="form-row"><label>Role to apply</label>
-          <select name="vcRoleId">
-            <option value="">— none —</option>
-            ${roles.map(r => `<option value="${r.id}" ${cfg.vcRoleId === r.id ? 'selected' : ''}>@${r.name}</option>`).join('')}
-          </select>
+
+    <form method="POST" action="/temproles/vc/save?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">VC Role — Applied on Join, Removed on Leave</div>
+        <p style="font-size:.8rem;color:var(--muted);margin-bottom:1rem;">This role is automatically applied when a member enters any voice channel, and removed when they leave. The announcement fires when a voice channel goes from 0 → 1 non-bot member (including when someone switches into an empty room).</p>
+        <div class="form-row"><label>Role to apply on VC join</label>
+          ${roleSearch}
+          <select name="vcRoleId"><option value="">— none —</option>${roleOpts(cfg.vcRoleId)}</select>
         </div>
-        <div class="form-row"><label>Announce channel (pings when VC goes 0→1 person)</label>
-          <select name="announceChannelId">
-            <option value="">— no announcement —</option>
-            ${textChannels.map(c => `<option value="${c.id}" ${cfg.announceChannelId === c.id ? 'selected' : ''}>#${c.name}</option>`).join('')}
-          </select>
+        <div class="form-row"><label>Announce channel — posts when a VC goes 0 → 1 person</label>
+          ${chanSearch}
+          <select name="announceChannelId"><option value="">— no announcement —</option>${chanOpts(cfg.announceChannelId)}</select>
+        </div>
+        <div class="form-row"><label>VC text channel — receives join/leave messages</label>
+          ${chanSearch}
+          <select name="vcTextChannelId"><option value="">— no VC text channel —</option>${chanOpts(cfg.vcTextChannelId)}</select>
+        </div>
+        <div class="form-row"><label>Custom announcement message (optional)</label>
+          <input type="text" name="announceMsg" value="${(cfg.announceMsg || '').replace(/"/g,'&quot;')}" placeholder="{user} joined {channel}! Use {mention} for channel mention.">
+          <span style="font-size:.75rem;color:var(--muted);">Variables: <code>{user}</code> <code>{channel}</code> <code>{mention}</code></span>
         </div>
         <button type="submit" class="btn btn-primary">💾 Save VC Role</button>
-      </form>
-    </div>
-    <div class="card">
-      <div class="card-title">Timed Button Roles</div>
-      <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">Create a role + duration. Then use a button with custom ID <code>temprole:ROLE_ID</code> in any Discord message builder.</p>
-      <form method="POST" action="/temproles/timed/save?guild=${guildId}">
+      </div>
+    </form>
+
+    <form method="POST" action="/temproles/timed/save?guild=${guildId}">
+      <div class="card">
+        <div class="card-title">Add Timed Button Role</div>
+        <p style="font-size:.8rem;color:var(--muted);margin-bottom:1rem;">Members click a button in Discord to receive this role temporarily. The role is automatically removed when the duration expires.</p>
         <div class="form-row"><label>Role</label>
-          <select name="roleId">
-            <option value="">— select role —</option>
-            ${roles.map(r => `<option value="${r.id}">@${r.name}</option>`).join('')}
-          </select>
+          ${roleSearch}
+          <select name="roleId"><option value="">— select role —</option>${roleOpts('')}</select>
         </div>
         <div class="form-row"><label>Duration (minutes)</label><input type="number" name="durationMinutes" value="30" min="1" max="10080"></div>
         <button type="submit" class="btn btn-primary">➕ Add Timed Role</button>
-      </form>
-      ${timedRows ? `<div style="margin-top:1.25rem;"><table><thead><tr><th>Role</th><th>Duration</th><th>Button ID</th><th></th></tr></thead><tbody>${timedRows}</tbody></table></div>` : ''}
-    </div>`;
+      </div>
+    </form>
+
+    ${timedRows ? `
+    <div class="card">
+      <div class="card-title">Active Timed Roles — Post Button</div>
+      <p style="font-size:.8rem;color:var(--muted);margin-bottom:1rem;">Select a channel and click <strong>📤 Post</strong> to post the role button in that channel.</p>
+      <table>
+        <thead><tr><th>Role</th><th>Duration</th><th>Post button to channel</th><th></th></tr></thead>
+        <tbody>${timedRows}</tbody>
+      </table>
+    </div>` : '<div class="card"><p style="color:var(--muted)">No timed roles configured yet. Add one above.</p></div>'}`;
+
   res.send(renderLayout({ title: 'Temp Roles', guildId, currentPath: '/temproles', allowedGuildIds, username: req.session.userTag, body }));
 });
 
@@ -2176,6 +3088,8 @@ app.post('/temproles/vc/save', (req, res) => {
   if (!tr[guildId]) tr[guildId] = {};
   tr[guildId].vcRoleId = req.body.vcRoleId || null;
   tr[guildId].announceChannelId = req.body.announceChannelId || null;
+  tr[guildId].vcTextChannelId = req.body.vcTextChannelId || null;
+  tr[guildId].announceMsg = req.body.announceMsg?.trim() || null;
   saveTR(tr);
   res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('✅ VC role saved.')}`);
 });
@@ -2191,6 +3105,24 @@ app.post('/temproles/timed/save', (req, res) => {
   tr[guildId].timedRoles.push({ roleId, durationMinutes: parseInt(durationMinutes) || 30 });
   saveTR(tr);
   res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('✅ Timed role added.')}`);
+});
+
+app.post('/temproles/timed/postbutton', async (req, res) => {
+  const guildId = resolveGuildId(req);
+  if (!guildId) return res.redirect('/');
+  const { roleId, channelId, label, durationMinutes } = req.body;
+  if (!channelId) return res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('❌ Select a channel to post to.')}`);
+  const guild = client.guilds.cache.get(guildId);
+  const ch = guild?.channels.cache.get(channelId);
+  if (!ch) return res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('❌ Channel not found.')}`);
+  try {
+    const role = guild.roles.cache.get(roleId);
+    const btn = new ButtonBuilder().setCustomId(`temprole:${roleId}`).setLabel(label?.trim() || 'Get Role').setStyle(ButtonStyle.Primary);
+    await ch.send({ content: `Click the button below to receive the **${role?.name || 'role'}** for ${durationMinutes} minute(s).`, components: [new ActionRowBuilder().addComponents(btn)] });
+    res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('✅ Button posted to #' + ch.name)}`);
+  } catch (err) {
+    res.redirect(`/temproles?guild=${guildId}&flash=${encodeURIComponent('❌ Error: ' + err.message)}`);
+  }
 });
 
 app.post('/temproles/timed/delete', (req, res) => {
