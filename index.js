@@ -1639,7 +1639,7 @@ function renderLayout({ title, guildId, currentPath, allowedGuildIds, body, user
 ${DASH_CSS}
 </head><body>
 <nav>
-  <span class="nav-logo">⚙️ HSC DASHBOARD</span>
+  <span class="nav-logo">⚙️ HIGH-SPEED CONNECTION DASHBOARD</span>
   <ul class="nav-links">
     <li><a href="https://high-speed-connection.fly.dev" target="_blank">← Site</a></li>
     <li class="nav-user">👤 ${username || 'Unknown'}</li>
